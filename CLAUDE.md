@@ -3,6 +3,15 @@
 ## 프로젝트 한 줄 요약
 IoT 펌웨어 두 버전을 비교해 변경된 함수를 자동 추출하고, C 의사코드(pseudocode) 수준에서 보안 취약점을 분석하는 파이프라인.
 
+## GitHub 저장소
+
+| 구분 | URL | 용도 |
+|------|-----|------|
+| 개인 (기본) | https://github.com/zlfnfnqnssh/iot-patch-diffing | 개인 개발 기록, 문서, 코드 |
+| 팀 | https://github.com/seosamuel02/Patch-Learner | 팀 협업, 로컬 경로: `c:/Users/deser/Desktop/project/Patch-Learner-collab`, 브랜치: `riri` |
+
+**규칙:** 아무 말 없으면 개인 저장소에 push. "팀쪽으로" 또는 "team에" 언급 시 팀 저장소 `riri` 브랜치에 push.
+
 ## 핵심 경로
 
 | 항목 | 경로 |
