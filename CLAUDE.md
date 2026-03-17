@@ -26,6 +26,35 @@ IoT 펌웨어 두 버전을 비교해 변경된 함수를 자동 추출하고, C
 `security_candidates.json` (보안 우선순위 상위 50개 함수) 기반으로
 before/after pseudocode → LLM 분석 → 패턴 카드 JSON 자동 생성
 
+## 자동 문서화 규칙
+
+다음 상황이 발생하면 **반드시** `docs/dev-notes.md`에 날짜별 항목을 추가하고, 변경된 파일을 GitHub에 자동 push한다:
+
+- 코드 수정 (버그 수정, 로직 변경, 성능 개선 등)
+- 새 기능 추가 (새 스텝, 새 스크립트, 새 옵션 등)
+- 에러 발생 및 해결 (원인, 해결책 포함)
+- 파이프라인 설계 변경 (방식 전환, 구조 변경 등)
+- 분석 결과 발견 (노이즈 유형, 새 패턴, 통계 등)
+
+**dev-notes.md 작성 형식:**
+```
+### YYYY-MM-DD | 변경 내용 한 줄 제목
+
+**진행 내용 / 문제 / 해결:**
+- 구체적 내용
+
+**코드 변경 (있을 경우):**
+코드 스니펫
+```
+
+**GitHub push 방법:**
+```bash
+cd c:/Users/deser/Desktop/project/iot-patch-diffing
+git add -A
+git commit -m "설명"
+git push origin main
+```
+
 ## 관련 문서
 - [프로젝트 개요 및 목표](docs/project-overview.md)
 - [파이프라인 개발 과정](docs/pipeline.md)
