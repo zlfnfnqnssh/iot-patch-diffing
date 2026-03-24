@@ -1,6 +1,6 @@
 # IoT 카메라 펌웨어 CVE 조사 보고서
 
-> 마지막 업데이트: 2026-03-23
+> 마지막 업데이트: 2026-03-24
 > 조사 대상: 10개 제조사 / 6개국
 > **패치 디핑 가능 여부** 기준: 구버전 펌웨어를 공개 다운로드로 얻을 수 있는지
 
@@ -8,18 +8,18 @@
 
 ## 패치 디핑 적합도 요약 (한눈에 보기)
 
-| 제조사 | 구버전 공개 여부 | 암호화 | 적합도 |
-|--------|--------------|-------|--------|
-| Synology | **전 버전 아카이브 공개** | 없음 | **최상** |
-| TP-Link Tapo | GitHub 아카이브 (비공식, 다수) | AES (복호화 도구 있음) | **상** |
-| Reolink | GitHub 아카이브 (비공식, 190개 모델) | 없음 | **상** |
-| Hikvision | EU 포털 (구버전 다수, 브라우저 접근) | XOR (복호화 도구 있음) | **상** |
-| AXIS | 공식 지원 (다운로드 가능) | 부분 | **중** |
-| D-Link | 공식 지원 (EOL 포함) | 없음~부분 | **중** |
-| Dahua | dahuawiki.com (비공식 인덱스) | AES-256 (어려움) | **중-하** |
-| Ubiquiti | 계정 필요 / 비공식 링크 모음 | 없음 | **중** |
-| Hanwha | 공식 다운 (구버전 제한적) | 부분 | **하** |
-| IDIS | 최신만 공개 | 미상 | **부적합** |
+| 제조사 | 구버전 공개 여부 | 암호화 | 적합도 | 분석 상태 |
+|--------|--------------|-------|--------|----------|
+| Synology | **전 버전 아카이브 공개** | 없음 | **최상** | **진행 예정** (BC500 SA_23_11) |
+| TP-Link Tapo | GitHub 아카이브 (비공식, 다수) | AES (복호화 도구 있음) | **상** | - |
+| Reolink | GitHub 아카이브 (비공식, 190개 모델) | 없음 | **상** | - |
+| Hikvision | EU 포털 (구버전 다수, 브라우저 접근) | XOR (복호화 도구 있음) | **상** | - |
+| AXIS | 공식 지원 (다운로드 가능) | 부분 | **중** | - |
+| D-Link | 공식 지원 (EOL 포함) | 없음~부분 | **중** | - |
+| Dahua | dahuawiki.com (비공식 인덱스) | AES-256 (어려움) | **중-하** | - |
+| Ubiquiti | 계정 필요 / 비공식 링크 모음 | 없음 | **중** | **분석 완료** (UniFi Camera S2L) |
+| Hanwha | 공식 다운 (구버전 제한적) | 부분 | **하** | - |
+| IDIS | 최신만 공개 | 미상 | **부적합** | - |
 
 ---
 
@@ -38,9 +38,10 @@
 
 ---
 
-## 1. Synology Camera (대만)
+## 1. Synology Camera (대만) — **분석 진행 예정**
 
 > **패치 디핑 최적 대상** — 전 버전 공개 아카이브 존재, 암호화 없음
+> **다음 분석 대상:** BC500 1.0.4-0182 vs 1.0.5-0185 (SA_23_11 Format String → RCE)
 
 ### 제품 라인업
 | 제품 | 형태 | 특징 |
@@ -62,8 +63,8 @@
 
 | 버전 | 다운로드 | CVE/SA 관련 |
 |------|---------|-----------|
-| 1.0.4-0182 | https://archive.synology.com/download/Firmware/Camera/BC500/1.0.4-0182 | SA_23_11 이전 (취약) |
-| 1.0.5-0185 | https://archive.synology.com/download/Firmware/Camera/BC500/1.0.5-0185 | SA_23_11 **패치** |
+| 1.0.4-0182 | https://archive.synology.com/download/Firmware/Camera/BC500/1.0.4-0182 | SA_23_11 이전 (취약) — **분석 예정 (old)** |
+| 1.0.5-0185 | https://archive.synology.com/download/Firmware/Camera/BC500/1.0.5-0185 | SA_23_11 **패치** — **분석 예정 (new)** |
 | 1.0.6-0290 | https://archive.synology.com/download/Firmware/Camera/BC500/1.0.6-0290 | - |
 | 1.0.6-0294 | https://archive.synology.com/download/Firmware/Camera/BC500/1.0.6-0294 | - |
 | 1.0.7-0298 | https://archive.synology.com/download/Firmware/Camera/BC500/1.0.7-0298 | SA_23_15 **패치** (Pwn2Own 2023) |
@@ -258,7 +259,11 @@
 
 ---
 
-## 5. Ubiquiti UniFi Protect (미국)
+## 5. Ubiquiti UniFi Protect (미국) — **분석 완료**
+
+> **분석 대상:** UniFi Camera S2L (v4.30.0 → v4.51.4, ARM)
+> **분석 결과:** 34개 IoT 패턴 카드 (CRITICAL:1, HIGH:13, MEDIUM:17, LOW:3), CVE 매칭 15건
+> **주요 발견:** Command Injection (sysExecSimple), /etc/passwd 인젝션, 인증 우회, 하드코딩 AES 키
 
 ### 제품 라인업
 | 모델 | 특징 |

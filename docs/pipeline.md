@@ -17,6 +17,12 @@
                 Step 6: Pseudocode Diff 생성
                         ↓
                 Step 7: 요약 리포트
+                        ↓
+                Step 8: IoT 보안 후보 선별 (키워드/위험함수/바이너리 가중치)
+                        ↓
+                Step 9: Discovery → Analysis 2단계 LLM 분석 (병렬 에이전트)
+                        ↓
+                Step 10: Pydantic 검증 + SQLite DB 저장
 ```
 
 ---
@@ -130,6 +136,83 @@ function_diffs/ubnt_cgi/
 - `diff_results.json` — 구조화된 분석 결과
 - `function_diff_stats.json` — 함수별 diff 통계
 
+## Step 8: IoT 보안 후보 선별 (Security Candidate Scoring)
+
+> `src/analyzers/generate_security_candidates.py`
+
+**기존 문제:** 키워드 스코어링이 crypto/auth 위주 → OpenSSL/Dropbear만 선별, IoT 바이너리(ubnt_*) 0개
+
+**개선된 스코어링 시스템:**
+
+| 카테고리 | 항목 | 예시 |
+|----------|------|------|
+| 함수명 키워드 (80+개) | auth:30, cgi:25, system:25, firmware:25, exec:25 | `authenticateToken` → 30점 |
+| 위험 함수 패턴 (14개) | system(), exec(), sprintf(), strcpy(), memcpy() | diff에서 직접 탐지 |
+| 바이너리 우선순위 | ubnt_cgi:50, ubnt_ctlserver:40, ubnt_networkd:40 | IoT 바이너리 가중치 |
+
+**결과:**
+- 전체 5,497개 변경 함수 → 1,099개 선별 (20%)
+- IoT 바이너리: 177개 (16%) — ubnt_cgi 91, ubnt_ctlserver 24, ubnt_networkd 22
+
+## Step 9: Discovery → Analysis 2단계 LLM 분석
+
+> `src/analyzers/multi_agent_pipeline.py`
+
+토스 보안팀 블로그에서 영감을 받은 2단계 에이전트 파이프라인:
+
+```
+Supervisor (Opus)
+    |
+    +-- Discovery: 1,099개 후보 → 보안 관련성 필터 (Yes/No + 이유)
+    |
+    +-- Analysis: 필터된 함수 → 배치 분할 → 병렬 Sonnet 에이전트
+    |       Agent 1: ubnt_cgi (12함수) → 패턴 카드 JSON
+    |       Agent 2: ubnt_ctlserver (10함수) → 패턴 카드 JSON
+    |       Agent 3: ubnt_networkd (12함수) → 패턴 카드 JSON
+    |
+    +-- Review + Merge: Pydantic 검증 → 심각도 정렬 → ID 재할당
+```
+
+**패턴 카드 필드:**
+```json
+{
+  "id": "LPC-IoT-004",
+  "binary": "ubnt_cgi",
+  "function": "sub_30A68",
+  "vulnerability_type": "Command Injection",
+  "cwe": "CWE-78",
+  "severity": "CRITICAL",
+  "confidence": "HIGH",
+  "is_security_relevant": true,
+  "summary": "WiFi SSID/passphrase passed unsanitized to sysExecSimple",
+  "vulnerability_detail": "...",
+  "fix_detail": "...",
+  "attack_scenario": "...",
+  "detection_keywords": ["sysExecSimple", "WiFi", "passphrase"],
+  "cve_similar": "CVE-2021-22909"
+}
+```
+
+## Step 10: Pydantic 검증 + SQLite DB 저장
+
+> `src/analyzers/pattern_card_schema.py` + `src/db/load_pattern_cards.py`
+
+**Pydantic 검증:**
+- VulnerabilityType enum (17개 유형) + 비정형 입력 자동 정규화
+- CWE 형식 자동 보정 (`CWE120` → `CWE-120`)
+- severity/confidence 대소문자 정규화
+- 짧은 텍스트 필드 자동 패딩 (비보안 카드)
+
+**SQLite 저장:**
+- `schema.sql`에 `pattern_cards` 테이블 추가 (19개 컬럼)
+- `load_pattern_cards.py`: JSON → DB INSERT OR REPLACE
+- 인덱스: binary_name, severity, vulnerability_type, cve_similar
+
+**최종 결과:**
+- 34개 IoT 패턴 카드 (CRITICAL:1, HIGH:13, MEDIUM:17, LOW:3)
+- CVE 매칭: 15/34 (44%)
+- 분석 바이너리: ubnt_cgi(12), ubnt_ctlserver(10), ubnt_networkd(12)
+
 ---
 
 ## 출력 디렉토리 구조
@@ -150,7 +233,24 @@ UVC_vs_uvc/
 │       └── sub_XXX.c.diff
 ├── hash_compare.json
 ├── diff_results.json
-├── security_candidates.json ← LLM 분석용 보안 우선순위 50개
+├── security_candidates.json ← IoT 포함 보안 후보 1,099개
+├── llm_cards_iot_cgi.json   ← ubnt_cgi 패턴 카드 12개
+├── llm_cards_iot_ctlserver.json ← ubnt_ctlserver 패턴 카드 10개
+├── llm_cards_iot_merged.json ← 전체 IoT 패턴 카드 34개
 ├── function_diff_stats.json
 └── summary_step5to7.md
+```
+
+## SQLite DB 구조
+
+```
+src/db/patch_learner.db
+├── firmware_versions      ← 펌웨어 버전 관리
+├── diff_sessions          ← 디핑 세션 (old vs new)
+├── changed_files          ← 해시 디핑 결과
+├── bindiff_results        ← BinDiff 바이너리 단위
+├── changed_functions      ← 변경 함수 개별 정보
+├── security_patches       ← LLM 보안 패치 분석 (상세)
+├── pattern_cards          ← 패턴 카드 요약 (34개)
+└── hunt_findings          ← 0-day 헌팅 결과
 ```

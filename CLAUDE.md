@@ -27,13 +27,16 @@ IoT 펌웨어 두 버전을 비교해 변경된 함수를 자동 추출하고, C
 | 단계 | 내용 | 상태 |
 |------|------|------|
 | Step 0~3 | 펌웨어 추출 / 해시 비교 / 분류 / 텍스트 diff | ✅ 완료 |
-| Step 4 | IDA 통합 추출 (디컴파일 + BinExport) | 🔄 145/250개 (중단됨) |
-| Step 5~7 | BinDiff 매칭 / Pseudocode Diff / 리포트 | ✅ 완료 (이전 실행 결과 존재) |
-| 다음 단계 | LLM 보안 분석 + 패턴 카드 작성 | ⏳ 대기 |
+| Step 4 | IDA 통합 추출 (디컴파일 + BinExport) | ✅ 완료 (145/250) |
+| Step 5~7 | BinDiff 매칭 / Pseudocode Diff / 리포트 | ✅ 완료 |
+| Step 8 | IoT 보안 후보 선별 (1,099/5,497) | ✅ 완료 |
+| Step 9 | Discovery → Analysis 2단계 LLM 분석 | ✅ 완료 (34 IoT 패턴 카드) |
+| Step 10 | Pydantic 검증 + SQLite DB 저장 | ✅ 완료 |
 
 ## 다음에 할 일
-`security_candidates.json` (보안 우선순위 상위 50개 함수) 기반으로
-before/after pseudocode → LLM 분석 → 패턴 카드 JSON 자동 생성
+- 다른 펌웨어(Synology 등) 대상 크로스 디바이스 변종 헌팅
+- 패턴 카드 기반 Detection Rules 자동 생성
+- hunt_findings 테이블 활용한 0-day 후보 관리
 
 ## 자동 문서화 규칙
 

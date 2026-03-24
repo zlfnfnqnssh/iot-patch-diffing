@@ -174,6 +174,121 @@ def _find_rootfs(out_dir: Path) -> Path:
 
 ---
 
+### 2026-03-23 | 팀 GitHub 연결 + IoT 카메라 CVE 리서치 + 멀티 에이전트 패턴 카드 설계
+
+**진행 내용:**
+
+1. **팀 GitHub 연결**
+   - `https://github.com/seosamuel02/Patch-Learner` 클론 → `Patch-Learner-collab/`
+   - 작업 브랜치 `riri` 생성 및 push 완료
+   - CLAUDE.md에 개인/팀 저장소 구분 규칙 추가
+
+2. **IoT 카메라 CVE 리서치 문서 작성** (`docs/iot_camera_cve_research.md`)
+   - 10개 제조사 / 6개국 조사
+   - 구버전 펌웨어 아카이브 실제 접근 검증 (curl)
+   - 펌웨어 암호화 여부 정리
+   - Synology 전 버전 공개 아카이브 확인 (패치 디핑 최적)
+
+3. **멀티 에이전트 패턴 카드 생성 시스템 설계**
+
+   ```
+   [Opus 4.6 — 매니저/리뷰어]
+           │
+           ├── 작업 분배 (top 50 → 25 + 25)
+           │
+           ├── Agent 1 (Sonnet) ── 후보 1~25 분석 → 패턴 카드 JSON
+           ├── Agent 2 (Sonnet) ── 후보 26~50 분석 → 패턴 카드 JSON
+           │   (병렬 실행)
+           │
+           └── 매니저 리뷰
+                 ├── 카드 품질 검토, 피드백
+                 └── 최종 llm_pattern_cards.json 확정
+   ```
+
+   **각 에이전트 역할:**
+   - 매니저 (Opus): 작업 분배, 결과 리뷰, 보안 정확성 검토
+   - Analyst Agent (Sonnet × 2): old.c/new.c 읽고 보안 분석, 패턴 카드 작성
+   - API 미사용 — Claude Code Agent 툴로 서브에이전트 spawn
+
+   **패턴 카드 필드:**
+   - vulnerability_type, cwe, severity, confidence
+   - summary, vulnerability_detail, fix_detail, attack_scenario
+   - detection_keywords, cve_similar, is_security_relevant
+
+4. **멀티 에이전트 패턴 카드 실행 완료**
+   - Opus 4.6(매니저) + Sonnet×2(분석) 구조로 50개 함수 분석
+   - Agent 1: libcrypto(15) + libssl(3) + dropbear(7) = 25개
+   - Agent 2: dropbear 25개
+   - 결과: `llm_pattern_cards.json` — 50카드 (33 보안관련, 17 비보안)
+   - 주요 발견: RSA timing side-channel(LPC-001), EVP integer overflow(LPC-018), ECDSA nonce reuse(LPC-048)
+
+5. **토스 보안팀 취약점 분석 자동화 분석 및 적용**
+   - [toss.tech 블로그](https://toss.tech/article/vulnerability-analysis-automation-1) 2편 분석
+   - 핵심 아이디어: SAST(Semgrep) + Multi-Agent + Pydantic 검증 + 오픈모델
+   - 우리 프로젝트에 적용 가능한 2가지 선별:
+     - Discovery → Analysis 2단계 에이전트 (토큰 50% 절감)
+     - Pydantic 구조화 출력 검증 (파싱 실패 0)
+
+6. **파이프라인 개선 구현**
+
+   **새 파일:**
+   - `src/analyzers/pattern_card_schema.py` — Pydantic 검증 스키마
+     - PatternCard, DiscoveryResult 모델
+     - VulnerabilityType 비정형 입력 정규화 (bof→Buffer Overflow 등)
+     - CWE 형식 자동 보정 (CWE120→CWE-120)
+     - CLI: `python pattern_card_schema.py cards.json`
+
+   - `src/analyzers/multi_agent_pipeline.py` — 2단계 오케스트레이터
+     - Discovery → Analysis 분리 (토스 방식 적용)
+     - 4단계: discovery → process → analysis → merge
+     - 프롬프트 템플릿 내장 (Discovery, Analysis, Review)
+     - Pydantic 검증 + 자동 보정 통합
+
+   **개선된 워크플로우:**
+   ```
+   이전:  Manager → [Analyst1(25개), Analyst2(25개)] → Review
+   이후:  Manager → Discovery(50개→필터) → [Analyst1, Analyst2] → Review + Pydantic 검증
+   ```
+
+   **검증 결과:**
+   - 기존 50개 패턴 카드 → 50/50 유효 (5개 자동 보정)
+   - 자동 보정: `attack_scenario` "해당 없음" → "해당 없음 (상세 분석 불필요)"
+
+---
+
+### 2026-03-24 | IoT 바이너리 보안 분석 + Pydantic 검증 + SQLite DB 저장
+
+**진행 내용:**
+
+1. **IoT 보안 후보 선별 시스템 구현** (`generate_security_candidates.py`)
+   - 기존: crypto/auth 키워드만 → OpenSSL/Dropbear만 50개 선별 (IoT 0개)
+   - 개선: IoT 키워드 80+개 + 위험함수 14패턴 + 바이너리 우선순위
+   - 결과: 5,497개 → 1,099개 선별 (20%), IoT 177개 (16%)
+
+2. **3개 IoT 바이너리 병렬 LLM 분석**
+   - ubnt_cgi (12카드): CRITICAL Command Injection 발견 (CVE-2021-22909)
+   - ubnt_ctlserver (10카드): /etc/passwd 인젝션, 인증 우회 등
+   - ubnt_networkd (12카드): 하드코딩 AES 키, TLV OOB 읽기, null deref 등
+   - 총 34개 IoT 패턴 카드 생성
+
+3. **Pydantic 검증 스키마** (`pattern_card_schema.py`)
+   - VulnerabilityType 17개 enum + 비정형 입력 자동 정규화
+   - 34/34 카드 검증 통과
+
+4. **SQLite DB 저장** (`schema.sql` + `load_pattern_cards.py`)
+   - `pattern_cards` 테이블 추가 (19개 컬럼)
+   - 34개 카드 INSERT 완료
+   - 인덱스: binary_name, severity, vulnerability_type, cve_similar
+
+**주요 발견:**
+- CRITICAL: WiFi SSID/passphrase → sysExecSimple 명령 주입 (CVE-2021-22909)
+- HIGH: /etc/passwd 직접 쓰기로 백도어 계정 생성 가능 (CVE-2020-8515)
+- HIGH: GetRequest 인증 없이 카메라 스냅샷 반환 (CVE-2022-23134)
+- HIGH: 펌웨어 덤프로 AES 페어링 키 추출 가능 (CWE-321)
+- 체계적 패턴: sign-extension `v|(v>>31)` 정수 언더플로우 — 코드베이스 전체에 반복
+
+---
+
 ## 주요 노이즈 유형 정리
 
 | 유형 | 설명 | 처리 방법 |
