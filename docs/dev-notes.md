@@ -324,6 +324,115 @@ def _find_rootfs(out_dir: Path) -> Path:
 
 ---
 
+### 2026-03-25 | 파이프라인 아키텍처 확정 (팀 논의)
+
+**진행 내용:**
+
+1. **Step 0~10 체계 → Stage 0~3 체계로 통합 확정**
+   - Stage 0: 펌웨어 추출 + 해시 디핑 (기존 Step 0~3 통합)
+   - Stage 1: BinDiff + 전체 디컴파일 → DB (기존 Step 4~7 통합)
+   - Stage 2: LLM 1-pass 전수 분석 (기존 Step 8~10 통합, 분류 단계 제거)
+   - Stage 3: 0-day 헌팅 (신규)
+
+2. **핵심 설계 결정**
+   - Discovery 분류 단계 스킵: BinDiff가 Discovery 역할, 우리 규모(30~200개)에서 별도 필터링 불필요
+   - severity/confidence: LLM 직접 판단, 임의 가중치 공식 사용 금지 (논문 신뢰성)
+   - 비보안 함수 포함 전수 DB 저장 (precision/recall 계산용 분모)
+   - 과탐 > 미탐 원칙 (토스 방식 채택)
+
+3. **팀 코드 비교 (collab vs main)**
+   - 팀: 모듈형 (6개 파일), DB 중심 데이터 흐름, IDA 2-pass (BinDiff 먼저 → 변경 주소만 디컴파일)
+   - 내 것: 통합형 (1개 파일 1,086줄), JSON 중심, IDA 1-pass (전체 추출 + 캐시)
+   - 확정: 내 IDA 방식(전체 추출 + 캐시) 채택, DB 저장은 팀 방식 참고
+
+4. **문서 정리**
+   - `docs/architecture-decisions.md` 신규 작성 (아키텍처 확정안)
+   - `docs/pipeline.md` 전면 개편 (Stage 0~3 구조)
+   - `docs/project-overview.md` 현재 상태 반영
+
+**참고:**
+- 토스 보고서: https://toss.tech/article/vulnerability-analysis-automation-1 (1편), 2편
+- 아키텍처 확정안: `docs/architecture-decisions.md`
+
+---
+
+### 2026-03-25 | DB 중심 설계 통합 (팀원 방식 반영)
+
+**진행 내용:**
+
+1. **`src/db/pipeline_db.py` 신규 작성** — 파이프라인 ↔ DB 연동 모듈
+   - `PipelineDB` 클래스: 세션 생성, 해시 비교 결과 저장, BinDiff 결과 저장, 변경 함수+pseudocode 저장
+   - 팀원의 DB 중심 데이터 흐름 설계를 팀장의 IDA 1-pass 파이프라인에 통합
+   - 중복 저장 방지 (기존 데이터 있으면 스킵)
+
+2. **`bindiff_pipeline.py` 수정** — DB 자동 저장 옵션 추가
+   - 새 CLI 인자: `--vendor`, `--model`, `--old-ver`, `--new-ver`, `--no-db`
+   - Step 1(해시 비교) 후 → `changed_files` 테이블 저장
+   - Step 5(BinDiff) 후 → `bindiff_results` + `changed_functions`(pseudocode 포함) 저장
+   - 파이프라인 완료 시 DB 현황 출력
+
+3. **`multi_agent_pipeline.py` 수정** — merge_and_validate()에 DB 자동 저장
+   - Pydantic 검증 통과 → JSON 저장 + DB `pattern_cards` 테이블 자동 저장
+   - `_save_cards_to_db()` 함수 추가
+
+**사용법 변경:**
+```bash
+# 이전 (JSON만 저장)
+python bindiff_pipeline.py --old fw_old/ --new fw_new/
+
+# 이후 (JSON + DB 동시 저장)
+python bindiff_pipeline.py --old fw_old/ --new fw_new/ \
+    --vendor synology --model BC500 --old-ver 1.0.5 --new-ver 1.0.6
+```
+
+---
+
+### 2026-03-26 | BC500 v1.0.5 vs v1.0.6 Stage 2 LLM 보안 분석 완료
+
+**진행 내용:**
+
+1. **MCP SQLite 서버 구성** (`.claude/settings.json`)
+   - `@modelcontextprotocol/server-sqlite` npx로 DB 연결
+   - 분석 세션 동안 Python sqlite3로 대체 사용
+
+2. **Stage 2 분석 전략 확정**
+   - 26,545개 함수 중 BinDiff mismatch(sim<0.01 & 크기비>3x) 제외
+   - Phase 1: Synology 특화 바이너리 우선 (synocam_param.cgi, central_server, nvtd, synoaid)
+   - Phase 2: curl, dhcpcd (라이브러리 버전 업그레이드로 판명 → 패치 없음)
+   - Phase 3: libcrypto/libssl/FFmpeg 등 → 전부 라이브러리 버전 업그레이드 → 스킵
+
+3. **핵심 발견: `system()/popen()` → `sub_6CEE0()` 전사 마이그레이션**
+   - `sub_6CEE0`은 Synology의 안전한 execve 래퍼 (argv[] 배열, 쉘 없음)
+   - central_server에서 총 9개 함수에서 system() 제거
+
+4. **보안 패치 DB 저장 완료 (security_patches 테이블)**
+   - `save_central_patches.py`, `save_central_patches2.py`, `save_nvtd_patches.py` 작성
+
+**분석 결과 (session_id=2, 총 16개):**
+
+| severity  | count | 대표 취약점 |
+|-----------|-------|------------|
+| CRITICAL  | 2     | `/etc/passwd` 외부파라미터 삽입, `chpasswd` 명령 인젝션 |
+| HIGH      | 7     | SynoPopen→execve, rm/cp/openssl 경로 인젝션, Format String |
+| MEDIUM    | 5     | killall/https cert system() 교체, ONVIF sprintf→snprintf |
+| LOW       | 2     | UTC timezone sprintf→snprintf |
+
+**바이너리별 패치 수:**
+- `central_server`: 11개 (CRITICAL 2, HIGH 5, MEDIUM 3, LOW 1)
+- `synocam_param.cgi`: 2개 (HIGH 2)
+- `nvtd`: 3개 (MEDIUM 2, LOW 1)
+- `synoaid` / `webd` / `librtsp_syno.so`: 0개
+
+**CRITICAL 패치 상세:**
+- `sub_E508`: `snprintf(s, ..., "echo \"%s:x:0:1101::/root:/bin/sh\" >> /etc/passwd", a1)` → hardcoded "synodebug" 교체. 외부 파라미터로 임의 root 계정 생성 가능했던 취약점 제거.
+- `sub_E47C`: `echo "user:pass" | chpasswd` 패턴에서 사용자명/비밀번호가 쉘 명령에 직접 삽입 → 큰따옴표 삽입으로 RCE 가능. BinDiff mismatch로 NEW 함수는 제거됨.
+
+**에러 및 해결:**
+- Windows CP949 터미널에서 em-dash(`—`) 출력 시 `UnicodeEncodeError` → `sys.stdout.reconfigure(encoding='utf-8')` 패턴으로 해결
+- Python heredoc 내 single-quote 충돌 → 스크립트 파일로 분리 후 실행
+
+---
+
 ## 주요 노이즈 유형 정리
 
 | 유형 | 설명 | 처리 방법 |

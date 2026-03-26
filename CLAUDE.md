@@ -31,12 +31,21 @@ IoT 펌웨어 두 버전을 비교해 변경된 함수를 자동 추출하고, C
 | Step 5~7 | BinDiff 매칭 / Pseudocode Diff / 리포트 | ✅ 완료 |
 | Step 8 | IoT 보안 후보 선별 (1,099/5,497) | ✅ 완료 |
 | Step 9 | Discovery → Analysis 2단계 LLM 분석 | ✅ 완료 (34 IoT 패턴 카드) |
-| Step 10 | Pydantic 검증 + SQLite DB 저장 | ✅ 완료 |
+| Step 10 | Pydantic 검증 + SQLite DB 저장 | ✅ 완료 (총 38개 패턴 카드) |
+
+### Synology BC500 (크로스 디바이스)
+
+| 단계 | 내용 | 상태 |
+|------|------|------|
+| v1.0.4 vs v1.0.5 | 전체 파이프라인 Step 0~10 | ✅ 완료 (4 패턴 카드, CRITICAL 포함) |
+| v1.0.5 vs v1.0.6 | Step 0~7 파이프라인 | ✅ 완료 |
+| v1.0.5 vs v1.0.6 | Stage 2 LLM 보안 분석 | ✅ 완료 (16개 패치, CRITICAL 2개) |
 
 ## 다음에 할 일
-- 다른 펌웨어(Synology 등) 대상 크로스 디바이스 변종 헌팅
 - 패턴 카드 기반 Detection Rules 자동 생성
 - hunt_findings 테이블 활용한 0-day 후보 관리
+- BC500 v1.0.6 → v1.0.7 분석 (있을 경우)
+- sub_6CEE0 패턴 기반 변종 헌팅 (다른 Synology 바이너리)
 
 ## 자동 문서화 규칙
 
