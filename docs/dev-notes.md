@@ -289,6 +289,41 @@ def _find_rootfs(out_dir: Path) -> Path:
 
 ---
 
+### 2026-03-25 | Synology BC500 .sa.bin 파서 구현 + 크로스 디바이스 분석 시작
+
+**진행 내용:**
+
+1. **Synology .sa.bin 포맷 분석 및 파서 구현** (`bindiff_pipeline.py`)
+   - `.sa.bin` 구조: 0x80-byte 헤더 → 0x82에서 raw zlib prescript → u32-prefixed zlib postscript → 파티션 배열
+   - 파티션 구조: `0x40-byte 이름` + `u32 sub_len` + `u32 img_len` + sub_data + img_data
+   - `_extract_ubi_to_squashfs()`: UBI PEB(128KB) EC/VID 헤더 파싱 → LEB 수집 → 헤더 제거 → squashfs 재조립
+   - `_extract_squashfs()`: PySquashfsImage `from_bytes()` + 재귀 `iterdir()`로 전체 파일시스템 추출
+
+2. **버그 수정 3건:**
+   - **prescript 길이 오류**: 0x80에서 u32 직접 읽으면 2.6B length 반환 → `zlib.decompressobj()`로 스트림 경계 탐지로 교체
+   - **인덴테이션 버그**: rootfs 탐색 코드가 파티션 for-loop 안에 있어 partition 0 처리 후 조기 반환 → 루프 밖으로 이동
+   - **PySquashfsImage API**: `from_fd()` → `from_bytes()`, `walk()` → 재귀 `iterdir()` 교체
+
+3. **subprocess 인코딩 수정:**
+   - IDA 서브프로세스 출력 cp949 오류 → `encoding="utf-8", errors="replace"` 3개 호출 모두 추가
+   - print 문의 em-dash(`—`) → 하이픈(`-`) 교체
+
+4. **Synology BC500 v1.0.4 vs v1.0.5 전체 파이프라인 완료**
+   - Step 0~10 완료: 107개 바이너리, 5,497개 변경 함수 분석
+   - LPC-SYN-001: **CRITICAL** Format String (CWE-134) — synocam_param.cgi `sub_40FD4`에서 `printf(user_input)` 패턴
+   - LPC-SYN-002: MEDIUM Memory Leak (CWE-401) — webd `sub_5DBD0` malloc 후 에러 경로 미해제
+   - LPC-SYN-003: MEDIUM Memory Leak (CWE-401) — synocam_param.cgi `sub_DD28` 동일 패턴
+   - LPC-SYN-004: LOW Feature Addition — nvtd `sub_69328` 기능 추가
+   - DB: Ubiquiti 34 + Synology 4 = **총 38개** 패턴 카드
+
+5. **Synology BC500 v1.0.5 vs v1.0.6 파이프라인 완료**
+   - 196개 파일 추가, 107개 바이너리 변경
+   - 주요 변경: webd 315 diffs (66.5% sim), nvtd 418 diffs (46.3% sim), central_server 257 diffs (87.9% sim)
+   - libssl.so / libcrypto.so 대규모 교체 (OpenSSL 업그레이드 추정)
+   - 보안 분석 진행 중
+
+---
+
 ## 주요 노이즈 유형 정리
 
 | 유형 | 설명 | 처리 방법 |
