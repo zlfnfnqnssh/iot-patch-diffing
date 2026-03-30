@@ -449,3 +449,70 @@ python bindiff_pipeline.py --old fw_old/ --new fw_new/ \
 - `ThreadPoolExecutor(max_workers=4)` — PC 성능에 따라 조정 필요
 - evostreamms (15,013개 함수), libcrypto (5,858개 함수) 등 대형 바이너리는 IDA 처리 시간 길어짐
 - BinDiff는 함수가 완전히 삭제/추가된 경우 `function` 테이블에 기록 안 됨 (unmatched 함수는 별도 처리 필요)
+
+---
+
+### 2026-03-30 | TP-Link Tapo C200v1 디핑 준비 + 펌웨어 복호화 검증
+
+**진행 내용:**
+
+1. **Reolink 취약점 조사 → 탈락**
+   - CVE 50+개 (Talos 연구) 있으나 대부분 미패치/EoL → 디핑 불가
+   - cgiserver.cgi, netserver 바이너리에 집중
+
+2. **TP-Link Tapo C200v1 선정**
+   - 선정 이유: CVE 활발 (2023~2025), 펌웨어 추출 가능, MIPS 아키텍처 (크로스 아키텍처 검증)
+   - 펌웨어 아카이브: https://github.com/tapo-firmware/Tapo_C200 (V1 20개 버전)
+
+3. **펌웨어 암호화 검증 (핵심)**
+   - `tp-link-decrypt` 빌드 완료 (WSL Ubuntu, `tapo_tools/tp-link-decrypt/`)
+     - `extract_keys.sh`에서 binwalk UBI 추출 실패 → 수동으로 `ubireader_extract_files`로 UBI 풀어서 `nvrammanager`, `slpupgrade`에서 RSA 키 추출
+     - SHA256 검증 통과, `make` 빌드 성공
+   - **C200v1 실제 테스트 결과: 암호화 없음!**
+     - v1.0.2, v1.0.3, v1.3.6 전부 `binwalk`가 SquashFS를 바로 감지
+     - tp-link-decrypt은 C200v1에는 불필요 (C210 등 신형 모델용)
+   - 기존 파이프라인의 `binwalk -e` (WSL) 경로가 그대로 동작
+
+4. **tp-link-decrypt 빌드 과정 (참고용)**
+   ```
+   # WSL Ubuntu에서:
+   cd tapo_tools/
+   git clone https://github.com/robbins/tp-link-decrypt.git
+   cd tp-link-decrypt
+
+   # 의존성
+   sudo apt-get install -y libssl-dev
+   pip install ubi_reader  # ubireader_extract_files 필요
+
+   # 키 추출 (extract_keys.sh가 자동화하지만, UBI 추출에서 실패할 수 있음)
+   # 수동 키 추출 절차:
+   #   1. extract_keys.sh 실행 → AX6000 펌웨어 다운 + binwalk 추출
+   #   2. binwalk가 UBI만 풀고 squashfs 못 풀면:
+   #      ubireader_extract_files -o ubi_out 3C1233.ubi
+   #   3. ubi_out에서 nvrammanager 찾아 strings | grep BgIAAAwk → RSA_1
+   #   4. C210 펌웨어도 binwalk 추출 → slpupgrade에서 → RSA_0
+   #   5. include/RSA_0.h, RSA_1.h 생성 (const char RSA_0[] = "...";)
+   #   6. make
+
+   # 사용법 (암호화된 펌웨어일 때만):
+   bin/tp-link-decrypt encrypted_firmware.bin > decrypted.bin
+   binwalk -Me decrypted.bin
+   ```
+
+5. **파이프라인 실행 명령어**
+   ```
+   python Patch-Learner-main/src/analyzers/bindiff_pipeline.py --old "Patch-Learner-main/firmware/Tapo_C200-main/Tapo_C200v1/Tapo_C200v1_en_1.0.2_Build_190821_Rel.40297n__1569812112373.bin" --new "Patch-Learner-main/firmware/Tapo_C200-main/Tapo_C200v1/Tapo_C200v1_en_1.0.3_Build_190911_Rel.61583n__1574130335308.bin" --vendor tp-link --model "Tapo C200v1" --old-ver 1.0.2 --new-ver 1.0.3
+   ```
+
+**암호화 판별법:**
+- `binwalk firmware.bin` → SquashFS 보이면 → 암호화 없음 → 바로 파이프라인 실행
+- 아무것도 안 보이면 → `tp-link-decrypt`로 복호화 후 진행
+
+**디핑 순서 (20개 버전):**
+```
+1.0.2 → 1.0.3 → 1.0.4 → 1.0.5 → 1.0.6 → 1.0.7 → 1.0.10 → 1.0.14 →
+1.0.16 → 1.0.17 → 1.0.18 → 1.1.1 → 1.1.11 → 1.1.15 → 1.1.16 → 1.1.18 →
+1.3.2 → 1.3.4 → 1.3.5 → 1.3.6
+```
+
+**파일명 참고:** 같은 버전에 타임스탬프만 다른 파일이 여러 개 있음 (예: `_1569812112373.bin` vs `_1572226147854.bin`). 버전 번호가 같으면 내용 동일 — 아무거나 하나만 사용.
