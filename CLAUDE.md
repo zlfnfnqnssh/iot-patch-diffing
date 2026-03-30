@@ -5,78 +5,52 @@ IoT 펌웨어 두 버전을 비교해 변경된 함수를 자동 추출하고, C
 
 ## GitHub 저장소
 
-| 구분 | URL | 용도 |
-|------|-----|------|
-| 개인 (기본) | https://github.com/zlfnfnqnssh/iot-patch-diffing | 개인 개발 기록, 문서, 코드 |
-| 팀 | https://github.com/seosamuel02/Patch-Learner | 팀 협업, 로컬 경로: `c:/Users/deser/Desktop/project/Patch-Learner-collab`, 브랜치: `riri` |
+| 구분 | URL | 브랜치 |
+|------|-----|--------|
+| 개인 (기본) | https://github.com/zlfnfnqnssh/iot-patch-diffing | `main` |
+| 팀 | https://github.com/seosamuel02/Patch-Learner | `riri` (로컬: `Patch-Learner-collab/`) |
 
-**규칙:** 아무 말 없으면 개인 저장소에 push. "팀쪽으로" 또는 "team에" 언급 시 팀 저장소 `riri` 브랜치에 push.
+**push 규칙:** 기본=개인 저장소. "팀쪽으로" / "team에" 언급 시 팀 저장소 `riri` 브랜치.
 
 ## 핵심 경로
 
 | 항목 | 경로 |
 |------|------|
 | 메인 파이프라인 | `Patch-Learner-main/src/analyzers/bindiff_pipeline.py` |
-| IDAPython 스크립트 | `Patch-Learner-main/ida_user/extract_with_decompile.py` |
-| IDA Pro 실행 파일 | `C:\Program Files\IDA Professional 9.0\idat64.exe` |
-| BinDiff 실행 파일 | `C:\Program Files\BinDiff\bin\bindiff.exe` |
-| 분석 결과 | `Patch-Learner-main/firmware/ubiquiti_s2/diffs/UVC_vs_uvc/` |
+| IDAPython | `Patch-Learner-main/ida_user/extract_with_decompile.py` |
+| DB | `Patch-Learner-main/src/db/patch_learner.db` |
+| IDA Pro | `C:\Program Files\IDA Professional 9.0\idat64.exe` |
+| BinDiff | `C:\Program Files\BinDiff\bin\bindiff.exe` |
 
 ## 현재 작업 상태
 
-| 단계 | 내용 | 상태 |
-|------|------|------|
-| Step 0~3 | 펌웨어 추출 / 해시 비교 / 분류 / 텍스트 diff | ✅ 완료 |
-| Step 4 | IDA 통합 추출 (디컴파일 + BinExport) | ✅ 완료 (145/250) |
-| Step 5~7 | BinDiff 매칭 / Pseudocode Diff / 리포트 | ✅ 완료 |
-| Step 8 | IoT 보안 후보 선별 (1,099/5,497) | ✅ 완료 |
-| Step 9 | Discovery → Analysis 2단계 LLM 분석 | ✅ 완료 (34 IoT 패턴 카드) |
-| Step 10 | Pydantic 검증 + SQLite DB 저장 | ✅ 완료 (총 38개 패턴 카드) |
+### Ubiquiti UniFi Camera (ARM, v4.30.0 vs v4.51.4)
+- Stage 0~2 완료, 38개 패턴 카드 (DB 저장)
 
-### Synology BC500 (크로스 디바이스)
+### Synology BC500
 
-| 단계 | 내용 | 상태 |
+| 비교 | 상태 | 결과 |
 |------|------|------|
-| v1.0.4 vs v1.0.5 | 전체 파이프라인 Step 0~10 | ✅ 완료 (4 패턴 카드, CRITICAL 포함) |
-| v1.0.5 vs v1.0.6 | Step 0~7 파이프라인 | ✅ 완료 |
-| v1.0.5 vs v1.0.6 | Stage 2 LLM 보안 분석 | ✅ 완료 (16개 패치, CRITICAL 2개) |
+| v1.0.4→v1.0.5 | ✅ 완료 | 4 패턴 카드 (CRITICAL 포함) |
+| v1.0.5→v1.0.6 | ✅ 완료 | 16 보안 패치 (CRITICAL 2, HIGH 7, MEDIUM 5, LOW 2) |
+
+### TP-Link Tapo C200v1 (MIPS, 진행 예정)
+- 펌웨어: 1.0.2 ~ 1.3.6 (20개 버전, 전부 암호화 없음, binwalk 직접 추출)
+- 다음 디핑: 1.0.2 → 1.0.3 → ... 순차 진행
 
 ## 다음에 할 일
-- 패턴 카드 기반 Detection Rules 자동 생성
+- TP-Link Tapo C200v1 순차 디핑 (1.0.2→1.0.3부터)
+- Detection Rules 자동 생성 (패턴 카드 기반)
 - hunt_findings 테이블 활용한 0-day 후보 관리
-- BC500 v1.0.6 → v1.0.7 분석 (있을 경우)
-- sub_6CEE0 패턴 기반 변종 헌팅 (다른 Synology 바이너리)
+- sub_6CEE0 패턴 기반 변종 헌팅
 
 ## 자동 문서화 규칙
-
-다음 상황이 발생하면 **반드시** `docs/dev-notes.md`에 날짜별 항목을 추가하고, 변경된 파일을 GitHub에 자동 push한다:
-
-- 코드 수정 (버그 수정, 로직 변경, 성능 개선 등)
-- 새 기능 추가 (새 스텝, 새 스크립트, 새 옵션 등)
-- 에러 발생 및 해결 (원인, 해결책 포함)
-- 파이프라인 설계 변경 (방식 전환, 구조 변경 등)
-- 분석 결과 발견 (노이즈 유형, 새 패턴, 통계 등)
-
-**dev-notes.md 작성 형식:**
-```
-### YYYY-MM-DD | 변경 내용 한 줄 제목
-
-**진행 내용 / 문제 / 해결:**
-- 구체적 내용
-
-**코드 변경 (있을 경우):**
-코드 스니펫
-```
-
-**GitHub push 방법:**
-```bash
-cd c:/Users/deser/Desktop/project/iot-patch-diffing
-git add -A
-git commit -m "설명"
-git push origin main
-```
+코드 수정, 기능 추가, 에러 해결, 설계 변경, 분석 결과 발견 시:
+1. `docs/dev-notes.md`에 `### YYYY-MM-DD | 제목` 형식으로 기록
+2. GitHub push: `cd iot-patch-diffing && git add -A && git commit -m "설명" && git push origin main`
 
 ## 관련 문서
-- [프로젝트 개요 및 목표](docs/project-overview.md)
-- [파이프라인 개발 과정](docs/pipeline.md)
-- [개발 특이사항 및 트러블슈팅](docs/dev-notes.md)
+- [프로젝트 개요](docs/project-overview.md) — 기획 동기, 목표, 검증 대상
+- [파이프라인 설계](docs/pipeline.md) — Stage 0~3 아키텍처
+- [개발 일지](docs/dev-notes.md) — 날짜별 트러블슈팅, 분석 결과
+- [아키텍처 결정](docs/architecture-decisions.md) — 팀 논의 확정안
