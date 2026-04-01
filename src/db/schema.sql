@@ -168,6 +168,42 @@ CREATE TABLE IF NOT EXISTS hunt_findings (
 );
 
 ---------------------------------------------------------------------
+-- 8. 패턴 카드 (LLM 분석 결과 요약)
+--    security_patches와 별도로 IoT 바이너리 분석 패턴 카드를 저장
+---------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pattern_cards (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    card_id         TEXT NOT NULL UNIQUE,         -- 'LPC-IoT-001'
+    diff_session_id INTEGER REFERENCES diff_sessions(id),
+
+    -- 대상 정보
+    binary_name     TEXT NOT NULL,                -- 'ubnt_cgi'
+    function_name   TEXT NOT NULL,                -- 'sub_34798'
+
+    -- 취약점 분류
+    vulnerability_type TEXT NOT NULL,             -- 'Command Injection'
+    cwe             TEXT,                         -- 'CWE-78'
+    severity        TEXT NOT NULL,                -- 'CRITICAL','HIGH','MEDIUM','LOW'
+    confidence      TEXT NOT NULL,                -- 'HIGH','MEDIUM','LOW'
+    is_security_relevant BOOLEAN NOT NULL DEFAULT 1,
+
+    -- 상세 내용
+    summary         TEXT NOT NULL,
+    vulnerability_detail TEXT,
+    fix_detail      TEXT,
+    attack_scenario TEXT,
+
+    -- 탐지/매칭
+    detection_keywords TEXT,                      -- JSON array as text
+    cve_similar     TEXT,                         -- 'CVE-2021-22909' or NULL
+
+    -- 메타
+    source_file     TEXT,                         -- 원본 JSON 파일 경로
+    created_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+
+---------------------------------------------------------------------
 -- 인덱스
 ---------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_sp_vuln_type ON security_patches(vuln_type);
@@ -176,3 +212,7 @@ CREATE INDEX IF NOT EXISTS idx_sp_severity ON security_patches(severity);
 CREATE INDEX IF NOT EXISTS idx_cf_binary ON changed_functions(binary_name);
 CREATE INDEX IF NOT EXISTS idx_hf_status ON hunt_findings(status);
 CREATE INDEX IF NOT EXISTS idx_ds_status ON diff_sessions(status);
+CREATE INDEX IF NOT EXISTS idx_pc_binary ON pattern_cards(binary_name);
+CREATE INDEX IF NOT EXISTS idx_pc_severity ON pattern_cards(severity);
+CREATE INDEX IF NOT EXISTS idx_pc_vuln_type ON pattern_cards(vulnerability_type);
+CREATE INDEX IF NOT EXISTS idx_pc_cve ON pattern_cards(cve_similar);

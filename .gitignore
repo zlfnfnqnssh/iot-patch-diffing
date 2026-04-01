@@ -1,0 +1,55 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Local tooling and editor state
+.claude/
+/--help
+
+# Analysis inputs / outputs
+/data/
+/logs/
+/output/
+/results/
+
+# Reports: keep reusable tooling, skip generated outputs and personal notes
+/report/__pycache__/
+/report/*.pdf
+/report/weekly-report-20*.md
+/report/*.txt
+
+# Commercial reverse-engineering tools and plugins
+/Hex-Rays IDA Professional*/
+/bindiff8_ida.dll
+/bindiff8_ida64.dll
+/binexport12_ida.dll
+/binexport12_ida64.dll
+
+# IDA / BinDiff generated artifacts
+*.id0
+*.id1
+*.id2
+*.id3
+*.idb
+*.i64
+*.nam
+*.til
+*.BinExport
+*.BinDiff
+
+# Databases and local caches
+/src/db/*.db
+/Patch-Learner-main/src/db/*.db
+*.sqlite
+
+# Embedded tool repos: keep source, skip nested git metadata and generated files
+/tools/tp-link-decrypt/.git/
+/tools/tp-link-decrypt/.git.embedded-backup/
+/tools/tp-link-decrypt/bin/
+/tools/tp-link-decrypt/example.jpg
+/tools/tp-link-decrypt-robbins/.git/
+/tools/tp-link-decrypt-robbins/.git.embedded-backup/
+/tools/tp-link-decrypt-robbins/tmp/
+/tools/tp-link-decrypt-robbins/example.jpg

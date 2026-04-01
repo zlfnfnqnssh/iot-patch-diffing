@@ -28,9 +28,19 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import time
 import zlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+# DB 모듈 (상대 import가 안 되므로 sys.path 추가)
+_DB_DIR = Path(__file__).resolve().parent.parent / "db"
+if str(_DB_DIR) not in sys.path:
+    sys.path.insert(0, str(_DB_DIR))
+try:
+    from pipeline_db import PipelineDB
+except ImportError:
+    PipelineDB = None
 
 # ── 절대 경로 ────────────────────────────────────────────────────
 IDA_PATH = Path(r"C:\Program Files\IDA Professional 9.0\idat64.exe")
@@ -39,12 +49,17 @@ BINDIFF_PATH = Path(r"C:\Program Files\BinDiff\bin\bindiff.exe")
 # ── IDAPython 통합 추출 스크립트 ──────────────────────────────────
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 EXTRACT_SCRIPT = PROJECT_ROOT / "ida_user" / "extract_with_decompile.py"
+TP_LINK_DECRYPT_DIR = PROJECT_ROOT / "tools" / "tp-link-decrypt"
+TP_LINK_DECRYPT_BIN = TP_LINK_DECRYPT_DIR / "bin" / "tp-link-decrypt"
 
 # ── IDA 임시 파일 확장자 (해시 비교에서 제외) ─────────────────────
 IDA_TEMP_EXTS = {".id0", ".id1", ".id2", ".id3", ".nam", ".til", ".idb", ".i64"}
 
 # ── 노이즈 필터링: 타임존 경로 패턴 ──────────────────────────────
 TIMEZONE_PATH_FRAGMENTS = {"zoneinfo/", "zoneinfo\\", "/posix/", "/right/"}
+TAPO_ENCRYPTED_HEADER = bytes.fromhex(
+    "0000020055aa4c5e831f534ba1f8f7c918df8fbf7da1aa55"
+)
 
 
 # =====================================================================
@@ -236,6 +251,144 @@ def _find_rootfs(out_dir: Path) -> Path:
     return out_dir
 
 
+def to_wsl_path(p: Path) -> str:
+    s = str(p.resolve()).replace("\\", "/")
+    if len(s) >= 2 and s[1] == ":":
+        return f"/mnt/{s[0].lower()}/{s[2:].lstrip('/')}"
+    return s
+
+
+def is_tapo_encrypted_firmware(path: Path) -> bool:
+    """Detect newer encrypted Tapo firmware before binwalk extraction."""
+    if not path.is_file():
+        return False
+    try:
+        with open(path, "rb") as f:
+            head = f.read(len(TAPO_ENCRYPTED_HEADER))
+        return head.startswith(TAPO_ENCRYPTED_HEADER)
+    except OSError:
+        return False
+
+
+def ensure_tp_link_decrypt() -> Path | None:
+    """Build the Tapo decrypt helper on demand if needed."""
+    if TP_LINK_DECRYPT_BIN.exists():
+        return TP_LINK_DECRYPT_BIN
+    if not TP_LINK_DECRYPT_DIR.exists():
+        print(f"      [WARN] tp-link-decrypt source not found: {TP_LINK_DECRYPT_DIR}")
+        return None
+
+    print("      [TAPO] building tp-link-decrypt helper...")
+    cmd = [
+        "wsl", "-d", "Ubuntu", "--", "bash", "-lc",
+        " ".join([
+            f"cd '{to_wsl_path(TP_LINK_DECRYPT_DIR)}'",
+            "&& mkdir -p bin",
+            "&& gcc -Isrc",
+            "src/tp-link-decrypt.c",
+            "src/des/des_min_enc.c",
+            "src/md5/md5.c",
+            "src/md5/md5_interface.c",
+            "src/rsa_verify/aes.c",
+            "src/rsa_verify/bigNumber.c",
+            "src/rsa_verify/rsaVerify.c",
+            "src/rsa_verify/shaAndSha512.c",
+            "-o bin/tp-link-decrypt",
+        ]),
+    ]
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+    )
+    if result.returncode != 0 or not TP_LINK_DECRYPT_BIN.exists():
+        print("      [ERROR] failed to build tp-link-decrypt")
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        if stderr:
+            safe = f"        stderr: {stderr[-500:]}".encode("cp949", "replace").decode("cp949")
+            print(safe)
+        elif stdout:
+            safe = f"        stdout: {stdout[-500:]}".encode("cp949", "replace").decode("cp949")
+            print(safe)
+        return None
+    return TP_LINK_DECRYPT_BIN
+
+
+def decrypt_tapo_firmware(fw_path: Path, cache_dir: Path) -> Path | None:
+    """Decrypt newer Tapo firmware into an output-local cache directory."""
+    helper = ensure_tp_link_decrypt()
+    if helper is None:
+        return None
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    work_fw = cache_dir / fw_path.name
+    dec_fw = work_fw.with_suffix(work_fw.suffix + ".dec")
+
+    if dec_fw.exists() and dec_fw.stat().st_size > 0:
+        print(f"      [TAPO] decrypt cache hit: {dec_fw.name}")
+        return dec_fw
+
+    if not work_fw.exists() or work_fw.stat().st_size != fw_path.stat().st_size:
+        shutil.copy2(fw_path, work_fw)
+
+    print(f"      [TAPO] decrypting {fw_path.name}...")
+    result = subprocess.run(
+        [
+            "wsl", "-d", "Ubuntu", "--", "bash", "-lc",
+            f"'{to_wsl_path(helper)}' '{to_wsl_path(work_fw)}' 1",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+    )
+    if result.returncode != 0:
+        print("      [ERROR] Tapo decrypt failed")
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        if stderr:
+            safe = f"        stderr: {stderr[-500:]}".encode("cp949", "replace").decode("cp949")
+            print(safe)
+        elif stdout:
+            safe = f"        stdout: {stdout[-500:]}".encode("cp949", "replace").decode("cp949")
+            print(safe)
+        return None
+    if not dec_fw.exists():
+        print(f"      [ERROR] decrypted firmware missing: {dec_fw}")
+        return None
+    print(f"      [TAPO] decrypted to {dec_fw.name}")
+    return dec_fw
+
+
+def shutdown_wsl_for_binwalk():
+    """Terminate running WSL instances before binwalk extraction."""
+    print("      [WSL] shutting down existing WSL instances...")
+    try:
+        result = subprocess.run(
+            ["wsl", "--shutdown"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60
+        )
+    except FileNotFoundError:
+        print("      [WARN] wsl.exe not found")
+        return
+    except subprocess.TimeoutExpired:
+        print("      [WARN] wsl --shutdown timed out; continuing")
+        return
+
+    if result.returncode not in (0, None):
+        stderr = (result.stderr or "").strip()
+        if stderr:
+            print(f"      [WARN] wsl --shutdown returned {result.returncode}: {stderr}")
+
+    # Give WSL a brief moment to fully tear down before starting Ubuntu again.
+    time.sleep(2)
+
+
 def extract_binwalk(fw_path: Path, out_dir: Path) -> Path:
     """binwalk -e로 펌웨어 추출 (WSL Ubuntu). 추출된 루트 경로 반환."""
     cache_marker = out_dir / ".extracted_ok"
@@ -246,38 +399,62 @@ def extract_binwalk(fw_path: Path, out_dir: Path) -> Path:
         return rootfs
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"    [EXTRACT] binwalk -e {fw_path.name}...")
+    binwalk_input = fw_path
+    if is_tapo_encrypted_firmware(fw_path):
+        decrypt_dir = out_dir.parent / "_decrypt_cache" / fw_path.stem
+        dec_fw = decrypt_tapo_firmware(fw_path, decrypt_dir)
+        if dec_fw is None:
+            print(f"    [FAIL] Tapo decrypt failed for {fw_path.name}")
+            return out_dir
+        binwalk_input = dec_fw
 
-    def to_wsl_path(p: Path) -> str:
-        s = str(p.resolve()).replace("\\", "/")
-        if len(s) >= 2 and s[1] == ":":
-            return f"/mnt/{s[0].lower()}/{s[2:].lstrip('/')}"
-        return s
-
-    wsl_fw = to_wsl_path(fw_path)
-    wsl_cwd = to_wsl_path(fw_path.parent)
+    print(f"    [EXTRACT] binwalk -e {binwalk_input.name}...")
+    wsl_fw = to_wsl_path(binwalk_input)
+    wsl_cwd = to_wsl_path(binwalk_input.parent)
 
     try:
+        shutdown_wsl_for_binwalk()
         env = {k: v for k, v in os.environ.items()}
         env["WSLENV"] = ""
-        subprocess.run(
-            ["wsl", "-d", "Ubuntu", "--", "bash", "-lc",
-             f"cd '{wsl_cwd}' && binwalk -e '{wsl_fw}'"],
-            capture_output=True, text=True, timeout=600, env=env
+        result = subprocess.run(
+            ["wsl", "-d", "Ubuntu", "--", "bash", "-c",
+             f"PATH=/usr/local/bin:/usr/bin:/bin && cd '{wsl_cwd}' && binwalk -e '{wsl_fw}'"],
+            capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=env
         )
     except Exception as e:
         print(f"    [ERROR] binwalk(WSL) 실행 실패: {e}")
         sys.exit(1)
 
-    extracted_name = f"_{fw_path.name}.extracted"
-    extracted_dir = fw_path.parent / extracted_name
+    if result.returncode != 0:
+        print(f"    [ERROR] binwalk returned {result.returncode}")
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        if stderr:
+            safe = f"      stderr: {stderr[-500:]}".encode("cp949", "replace").decode("cp949")
+            print(safe)
+        elif stdout:
+            safe = f"      stdout: {stdout[-500:]}".encode("cp949", "replace").decode("cp949")
+            print(safe)
+
+    extracted_name = f"_{binwalk_input.name}.extracted"
+    extracted_dir = binwalk_input.parent / extracted_name
 
     if not extracted_dir.exists():
         print(f"    [FAIL] binwalk 추출 결과 없음: {extracted_name}")
         return out_dir
 
     if out_dir.exists():
-        shutil.rmtree(out_dir)
+        try:
+            shutil.rmtree(out_dir)
+        except PermissionError:
+            # IDA가 .id0/.id1 파일을 잠금 중 → IDA 임시파일만 먼저 삭제
+            for ext in IDA_TEMP_EXTS:
+                for f in out_dir.rglob(f"*{ext}"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+            shutil.rmtree(out_dir, ignore_errors=True)
     shutil.move(str(extracted_dir), str(out_dir))
 
     rootfs = _find_rootfs(out_dir)
@@ -454,7 +631,7 @@ def run_combined_extract(binary: Path, functions_dir: Path,
 
     print(f"    [EXTRACT] {binary.name} ({tag})...")
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=900, env=env)
+        subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=900, env=env)
     except subprocess.TimeoutExpired:
         print(f"    [TIMEOUT] {binary.name} ({tag})")
         return None, None
@@ -499,7 +676,7 @@ def _run_binexport_only(binary: Path, binexport_path: Path) -> Path | None:
     ]
 
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+        subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600)
     except subprocess.TimeoutExpired:
         return None
 
@@ -540,7 +717,7 @@ def run_bindiff(old_binexport: Path, new_binexport: Path, output_dir: Path) -> P
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
     except subprocess.TimeoutExpired:
         print(f"    [TIMEOUT] BinDiff")
         return None
@@ -838,6 +1015,13 @@ def main():
     parser.add_argument("--old", required=True, help="이전 버전 (디렉토리 또는 펌웨어 파일)")
     parser.add_argument("--new", required=True, help="이후 버전 (디렉토리 또는 펌웨어 파일)")
     parser.add_argument("--output", default=None, help="결과 출력 디렉토리 (생략 시 자동)")
+    # DB 연동 옵션
+    parser.add_argument("--vendor", default=None, help="제조사 (예: tp-link, synology)")
+    parser.add_argument("--model", default=None, help="모델명 (예: Tapo_C200v1)")
+    parser.add_argument("--old-ver", default=None, help="이전 버전 (예: 1.0.2)")
+    parser.add_argument("--new-ver", default=None, help="이후 버전 (예: 1.0.3)")
+    parser.add_argument("--no-db", action="store_true", help="DB 저장 비활성화 (JSON만 저장)")
+    parser.add_argument("--db-path", default=None, help="DB 파일 경로 (생략 시 Patch-Learner-main)")
     args = parser.parse_args()
 
     old_input = Path(args.old)
@@ -850,6 +1034,22 @@ def main():
         print(f"[OUTPUT] {output_dir}")
 
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── DB 연동 초기화 ───────────────────────────────────────────
+    db = None
+    session_id = None
+    use_db = (not args.no_db and PipelineDB is not None
+              and args.vendor and args.model and args.old_ver and args.new_ver)
+
+    if use_db:
+        _default_db = PROJECT_ROOT / "Patch-Learner-main" / "src" / "db" / "patch_learner.db"
+        db_path = Path(args.db_path) if args.db_path else _default_db
+        db = PipelineDB(db_path)
+        session_id = db.create_session(args.vendor, args.model,
+                                       args.old_ver, args.new_ver)
+    elif not args.no_db and PipelineDB is not None:
+        if not (args.vendor and args.model and args.old_ver and args.new_ver):
+            print("[DB] --vendor, --model, --old-ver, --new-ver 미지정 - DB 저장 생략")
 
     # 환경 확인
     if not IDA_PATH.exists():
@@ -893,6 +1093,14 @@ def main():
     print(f"      text={len(text_files)}, binary={len(binary_files)}, "
           f"timezone_skipped={timezone_skipped}")
 
+    # ── DB 저장: changed_files + 세션 상태 ──────────────────────
+    if db and session_id:
+        db.save_changed_files(session_id, compare_result,
+                              old_dir, new_dir, binary_files, text_files)
+        db.update_session_status(session_id, "hash_diffed",
+                                 total_changed_binaries=len(binary_files),
+                                 total_changed_texts=len(text_files))
+
     # ── Step 3: 텍스트 diff ──────────────────────────────────────
     print(f"\n[3/7] 텍스트 diff ({len(text_files)}개)...")
     text_count = diff_text_files(old_dir, new_dir, text_files, output_dir)
@@ -914,7 +1122,7 @@ def main():
         else:
             todo.append(rel)
 
-    print(f"\n[4/7] 함수 추출 + BinExport — 전체 {len(binary_files)}개 "
+    print(f"\n[4/7] 함수 추출 + BinExport - 전체 {len(binary_files)}개 "
           f"(캐시 {len(cached)}개 스킵, 신규 {len(todo)}개 처리)")
 
     extract_results = {}  # rel -> (old_fj, new_fj, old_be, new_be)
@@ -986,6 +1194,35 @@ def main():
     results_json = output_dir / "diff_results.json"
     with open(results_json, "w", encoding="utf-8") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
+
+    # ── DB 저장: bindiff_results + changed_functions ─────────────
+    if db and session_id:
+        db_fn_total = 0
+        for rel, (old_fj, new_fj, _, _) in extract_results.items():
+            binary_name = Path(rel).name
+            if binary_name not in all_results:
+                continue
+
+            result = all_results[binary_name]
+            bd_id = db.save_bindiff_result(
+                session_id, rel, result,
+                str(bindiff_dir / binary_name)
+            )
+            if bd_id and old_fj and new_fj:
+                try:
+                    with open(old_fj, "r", encoding="utf-8") as f:
+                        old_funcs = json.load(f).get("functions", {})
+                    with open(new_fj, "r", encoding="utf-8") as f:
+                        new_funcs = json.load(f).get("functions", {})
+                except Exception:
+                    old_funcs, new_funcs = {}, {}
+
+                n = db.save_changed_functions(bd_id, binary_name, result,
+                                              old_funcs, new_funcs)
+                db_fn_total += n
+
+        db.update_session_status(session_id, "bindiffed")
+        print(f"[DB] bindiff_results + changed_functions 저장 완료 ({db_fn_total}개 함수)")
 
     # ── Step 6: 함수 Pseudocode Diff ─────────────────────────────
     print(f"\n[6/7] 함수 diff 생성...")
