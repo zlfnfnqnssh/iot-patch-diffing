@@ -442,6 +442,109 @@ python bindiff_pipeline.py --old fw_old/ --new fw_new/ \
 | 주소 재배치 | similarity 12.4%짜리 1-instruction 함수 | instruction 수 임계치로 필터 |
 | 링커 아티팩트 | `.init_proc`, `JUMPOUT(0)` 형태 | 함수 크기로 필터 가능 |
 
+---
+
+### 2026-03-31 | Tapo C200v1 순차 디핑 자동화 + 파이프라인 버그 수정 4건
+
+**진행 내용:**
+
+1. **`src/analyzers/sequential_diff.py` 신규 작성** — 폴더 내 .bin 파일 순차 자동 비교
+   - 파일명에서 버전 추출: `_en_(\d+)\.(\d+)\.(\d+)_` 정규식
+   - 버전 튜플로 정렬 후 연속 쌍 구성 (1.0.2→1.0.3, 1.0.3→1.0.4, ...)
+   - `bindiff_pipeline.py`를 subprocess로 호출 (pair당 1회)
+   - `function_diff_stats.json` 존재 시 스킵 (이어하기 지원)
+   - CLI: `--firmware-dir`, `--output-base`, `--from-version`, `--dry-run`
+   - `PROJECT_ROOT`: `Path(__file__).resolve().parent.parent.parent` — 드라이브 변경 시 자동 적응
+
+2. **binwalk WSL 설치**
+   - `wsl -d Ubuntu -u root -- apt-get install -y binwalk` 로 설치
+   - 버전: `binwalk 2.3.4+dfsg1-5` (dpkg -l 확인)
+
+3. **파이프라인 버그 수정 4건:**
+
+   **Bug 1: WSL binwalk PATH 문제 (binwalk 실행 결과 없음)**
+   - 원인: `-lc` (login shell) 사용 시 Windows PATH 먼저 적재 → Windows Python에 설치된 binwalk 스크립트 실행
+   - 해결: `-c` + 명시적 `PATH=/usr/local/bin:/usr/bin:/bin` 지정
+   ```python
+   # 변경 전
+   ["wsl", "-d", "Ubuntu", "--", "bash", "-lc", f"binwalk -e '{wsl_fw}'"]
+   # 변경 후
+   ["wsl", "-d", "Ubuntu", "--", "bash", "-c",
+    f"PATH=/usr/local/bin:/usr/bin:/bin && cd '{wsl_cwd}' && binwalk -e '{wsl_fw}'"]
+   ```
+
+   **Bug 2: UnicodeDecodeError cp949 (subprocess 출력 디코딩 실패)**
+   - 원인: `text=True`만 설정 시 Windows 기본 코드페이지(cp949) 사용, WSL는 UTF-8 출력
+   - 해결: binwalk, IDA, BinDiff(×2) 총 4개 `subprocess.run()` 호출에 `encoding='utf-8', errors='replace'` 추가
+
+   **Bug 3: UnicodeEncodeError em-dash (print 출력 실패)**
+   - 원인: f-string 내 em-dash(`—`) → Windows 터미널 cp949 인코딩 불가
+   - 해결: `—` → `-` 교체 (sequential_diff.py, bindiff_pipeline.py)
+
+   **Bug 4: PermissionError shutil.rmtree (IDA 파일 잠금)**
+   - 원인: IDA Pro가 .id0/.id1/.nam/.til 파일을 열어둔 채 종료 → rmtree 실패
+   - 해결: try/except 추가, 실패 시 IDA 임시 파일 개별 삭제 후 `ignore_errors=True`로 재시도
+
+4. **sqlite-mcp 설치 및 설정**
+   - `npm install -g mcp-sqlite` → `C:/home/riri/.npm-global/node_modules/mcp-sqlite/`
+   - `~/.claude/settings.json`에 MCP 서버 설정 추가 (patch_learner.db 연결)
+
+5. **첫 테스트: v1.0.2 → v1.0.3 성공**
+   - 출력물: extracted/, functions/, bindiff/, binexport/, function_diffs/, hash_compare.json, diff_results.json, function_diff_stats.json, summary.md
+
+6. **디스크 공간 부족 → 프로젝트 D 드라이브 이동**
+   - pair 6/20(v1.0.7→v1.0.8) 처리 중 C 드라이브 100% 점유 → WinError 112
+   - 전체 프로젝트 `D:\과제모음\4학년\project`로 이동
+   - sequential_diff.py는 `__file__` 기반 경로 계산 → 코드 변경 불필요
+   - 재실행 명령: `cd D:/과제모음/4학년/project && python src/analyzers/sequential_diff.py --from-version 1.0.7`
+
+**대상 펌웨어:**
+- TP-Link Tapo C200v1, v2는 일반 `binwalk` 경로로 처리 가능
+- Tapo C200v3, v4는 당시 기준으로 `signed/encrypted` 계열 여부를 추가 확인해야 했음
+- `sequential_diff.py`로 모델별 순차 자동화의 기본 틀을 확보
+
+| 모델 | 상태 |
+|------|------|
+| C200v1 | ✅ 완료 (1.0.2 ~ 1.3.6, 19쌍) |
+| C200v2 | ✅ 완료 |
+| C200v3 | 보류 (복호화/추출 경로 점검 필요) |
+| C200v4 | 보류 (복호화/추출 경로 점검 필요) |
+
+---
+
+### 2026-04-02 | Tapo v3/v4 복호화 경로 추가 + 상위 폴더 자동 실행 정리
+
+**진행 내용:**
+
+1. **`bindiff_pipeline.py`에 Tapo 복호화 분기 추가**
+   - `signed/encrypted` 헤더를 감지하면 `tp-link-decrypt`를 먼저 수행
+   - 복호화된 `.dec` 파일을 `binwalk` 입력으로 사용
+   - 복호화 산출물은 출력 폴더 하위 `_decrypt_cache/`에 저장
+
+2. **WSL 충돌 완화**
+   - `binwalk` 실행 전에 `wsl --shutdown`을 선행하도록 수정
+   - WSL이 열린 상태에서 `binwalk`가 실패하던 운영 이슈를 줄이도록 보강
+
+3. **`sequential_diff.py` 상위 폴더 실행 정리**
+   - `data/firmware/tapo_C200`처럼 상위 폴더를 주면 `Tapo_C200v1`~`v4`를 재귀 탐색
+   - 출력은 `output/<모델>/v<old>_vs_v<new>/` 구조로 고정
+
+4. **ipTIME 수집 자동화 초안 추가**
+   - `download_iptime_firmware.py` 작성
+   - 모델별 폴더를 만들고 과거 버전까지 수집하는 구조를 설계
+   - 사이트 타임아웃이 있어 실제 수집은 네트워크 상태를 보며 재시도 필요
+
+5. **문서/저장소 정리**
+   - 코드와 도구 소스만 GitHub에 올리고, 분석 산출물은 ignore 유지
+   - `data/`, `output/`는 빈 디렉터리 형태로만 저장소에 유지하도록 정리
+
+**상태 정리:**
+- Tapo C200v1, v2: Stage 0~1 산출물 확보
+- Tapo C200v3, v4: 복호화 선행 경로 구현, 공식 출력 경로 기준 재실행 진행
+- Stage 2: 다중 벤더 Stage 0~1 결과를 더 모은 뒤 일괄 수행 예정
+
+---
+
 ## 알려진 제약사항
 
 - IDA Pro 9.0 크랙 버전 사용 — 일부 플러그인 호환성 이슈 있음

@@ -9,9 +9,11 @@ __pycache__/
 /--help
 
 # Analysis inputs / outputs
-/data/
+/data/*
+!/data/.gitkeep
 /logs/
-/output/
+/output/*
+!/output/.gitkeep
 /results/
 
 # Reports: keep reusable tooling, skip generated outputs and personal notes
