@@ -9,16 +9,22 @@
 - 모르면 `null`. 추측 금지. "가능성 있음" 같은 애매한 표현 금지 — `confidence` 숫자로만.
 - Tool Use의 `input_schema`로 enum/structure 강제.
 
-## 2. False Positive 가드
+## 2. False Positive 가드 (v4 — recall 우선, 2026-04-18)
 
-다음 7종은 `is_security_patch=false`:
-1. 변수 이름만 바뀐 경우 (의미 동일)
-2. 주석/로그 메시지만 변경
-3. 컴파일러 최적화 아티팩트 (인라인화, 레지스터 할당 차이)
-4. BinDiff `similarity < 0.3` 매칭 (오매칭 가능성)
-5. 함수 시그니처 동일 + body가 null/stub (deleted function — 별도 명시)
-6. printf 포맷 철자 수정 (`"Successs"` → `"Success"`)
-7. 순수 리팩터링: 동일 로직의 헬퍼 추출/인라인화
+**기본 원칙: 애매하면 일단 `is_security_patch=true` + 낮은 confidence. FP로 버리지 말 것.**
+
+아래 6종은 **"ONLY" 조건** 모두 만족해야 `is_security_patch=false`. 부수적으로 하나라도 구조 변경
+(위험 호출 추가/제거, 제어 흐름 변경, 크기 상수 변경, 입력 검증 추가 등)이 있으면 `true`로.
+
+1. ~~변수 이름만 바뀐 경우~~ — **삭제됨.** IDA 디컴파일 결과는 변수명이 자동 생성(`v1`, `a1`)이라 이 규칙 무의미. IDA 버전업/동일 함수 재-디컴파일만으로도 이름이 달라짐.
+2. **주석/로그 메시지 ONLY 변경** — `printf("[DEBUG] ...")`, `access("/tmp/x.log", 0)` 게이트 추가 **외에 구조 변경 無** 확인 필수.
+3. 컴파일러 최적화 아티팩트 (인라인화, 레지스터 할당 차이) — 의미 등가 확신할 때만.
+4. BinDiff `similarity < 0.3` 매칭 — **단순 오매칭이면 판정 불가**. 이때는 `is_security_patch=true, confidence=0.4` + `needs_human_review=true` 로 내려 사람 검토 큐에 올림.
+5. 함수 시그니처 동일 + body가 null/stub (deleted function).
+6. printf 포맷 철자 수정 (`"Successs"` → `"Success"`) ONLY.
+7. **순수 리팩터링**: 헬퍼 추출/인라인화이되 **위험 호출(system/sprintf/strcpy/memcpy 등)의 개수·종류가 OLD/NEW 동일**해야. 검사/검증 추가/삭제 있으면 보안 관련일 수 있음.
+
+**"로그 추가 + 길이 검사 추가" 처럼 복합 변경이면 FP 아님 — 길이 검사가 주인공.**
 
 ## 3. Synology Hard Rules (BC500/DSM 계열)
 
@@ -46,16 +52,18 @@ BC500 16건 분석으로 학습된 치환 규칙:
 - 비공개 RPC `Cseq` 헤더 → `.bss` 버퍼 길이 미검증 → CVE-2025-31701 패밀리 (Dahua)
 - ONVIF `Host:` 헤더를 힙 버퍼에 `memcpy` 길이 미검증 → KVE-2023-5458 패밀리 (ipTIME C200)
 
-## 6. Confidence 기준표
+## 6. Confidence 기준표 (v4 — recall 우선, 2026-04-18)
 
-`confidence`는 이 기준으로만 매긴다 — 임의 0.7 금지.
+**핵심 전환: `0.50~0.69` 구간도 `is_security_patch=true`로 올린다.** 다만 `needs_human_review=true` 플래그를 붙여 사람 검토 큐에 들어가게.
 
-| 범위 | 조건 |
-|------|------|
-| **0.90+** | OLD에 명백한 위험 호출(`system`/`sprintf`/`popen`) + NEW에서 안전 래퍼로 **직접 교체**. 의심 없음. |
-| **0.70~0.89** | 패턴은 맞으나 source(외부 입력 여부)가 명시 증거로 확인 안 됨. |
-| **0.50~0.69** | 패치 가능성은 있으나 방어적 수정/리팩터링 구분 어려움. |
-| **< 0.50** | `is_security_patch=false`로 내린다. |
+| 범위 | 판정 | needs_human_review | 의미 |
+|------|------|--------------------|------|
+| **0.90+** | `true` | `false` | 명백. OLD 위험 호출 + NEW 안전 래퍼 직접 교체. 의심 없음. |
+| **0.70~0.89** | `true` | `false` | 패턴 맞으나 source 증거가 함수 경계 밖. |
+| **0.50~0.69** | **`true`** | **`true`** | 방어적 수정/리팩터링 구분 어려움. **DB에 넣되 사람 검토 큐로.** |
+| **< 0.50** | `false` | — | 근거 없음. `root_cause` 에만 기록. |
+
+**설계 이유**: 놓치는 비용 > 잘못 넣는 비용. 잘못 넣은 카드는 Hunter 단계의 precision 집계로 자동 retire. 놓친 취약점은 영구 소실. 따라서 ambiguous는 일단 포함.
 
 ## 7. 금지 행동
 

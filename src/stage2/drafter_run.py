@@ -253,7 +253,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
         raw = Path(p).read_text(encoding="utf-8")
         part = json.loads(raw)
         if not isinstance(part, list):
-            print(f"[apply] {p}: top-level JSON array 아님 — 스킵", file=sys.stderr)
+            print(f"[apply] {p}: top-level JSON array 아님 -- 스킵", file=sys.stderr)
             continue
         payload.extend(part)
         print(f"[apply] loaded {len(part)} items from {Path(p).name}")
@@ -263,6 +263,9 @@ def cmd_apply(args: argparse.Namespace) -> int:
 
     conn = sqlite3.connect(args.db)
     c = conn.cursor()
+    # 컬럼 존재 확인 후 needs_human_review 지원
+    cols = {r[1] for r in c.execute("PRAGMA table_info(security_patches)")}
+    has_nhr = "needs_human_review" in cols
 
     inserted_patches = 0
     new_cards = 0
@@ -277,31 +280,65 @@ def cmd_apply(args: argparse.Namespace) -> int:
             is_sec = bool(item["is_security_patch"])
             conf = item["confidence"]
             patch = item.get("patch_record") or {}
+            # v4: needs_human_review 플래그. Drafter가 명시하지 않으면 confidence 구간으로 자동 판단.
+            nhr_explicit = item.get("needs_human_review")
+            if nhr_explicit is None:
+                needs_review = is_sec and conf is not None and 0.50 <= conf < 0.70
+            else:
+                needs_review = bool(nhr_explicit)
 
-            c.execute(
-                """
-                INSERT INTO security_patches (
-                    changed_function_id, is_security_patch, confidence, vuln_type, cwe,
-                    severity, root_cause, fix_description, fix_category,
-                    attack_vector, requires_auth, attack_surface,
-                    source_desc, sink_desc, missing_check,
-                    known_cve, llm_model, llm_prompt_ver, analyst_id, analysis_raw
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    cf_id, 1 if is_sec else 0, conf,
-                    patch.get("vuln_type"), patch.get("cwe"),
-                    patch.get("severity"),
-                    patch.get("root_cause"), patch.get("fix_description"), patch.get("fix_category"),
-                    patch.get("attack_vector"),
-                    1 if patch.get("requires_auth") else (0 if "requires_auth" in patch else None),
-                    patch.get("attack_surface"),
-                    patch.get("source_desc"), patch.get("sink_desc"), patch.get("missing_check"),
-                    patch.get("known_cve"),
-                    "claude-opus-4-6[1m]", "stage2-drafter-v3", analyst_id,
-                    json.dumps(item, ensure_ascii=False),
-                ),
-            )
+            if has_nhr:
+                c.execute(
+                    """
+                    INSERT INTO security_patches (
+                        changed_function_id, is_security_patch, confidence, vuln_type, cwe,
+                        severity, root_cause, fix_description, fix_category,
+                        attack_vector, requires_auth, attack_surface,
+                        source_desc, sink_desc, missing_check,
+                        known_cve, llm_model, llm_prompt_ver, analyst_id, analysis_raw,
+                        needs_human_review
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cf_id, 1 if is_sec else 0, conf,
+                        patch.get("vuln_type"), patch.get("cwe"),
+                        patch.get("severity"),
+                        patch.get("root_cause"), patch.get("fix_description"), patch.get("fix_category"),
+                        patch.get("attack_vector"),
+                        1 if patch.get("requires_auth") else (0 if "requires_auth" in patch else None),
+                        patch.get("attack_surface"),
+                        patch.get("source_desc"), patch.get("sink_desc"), patch.get("missing_check"),
+                        patch.get("known_cve"),
+                        "claude-opus-4-6[1m]", "stage2-drafter-v4", analyst_id,
+                        json.dumps(item, ensure_ascii=False),
+                        1 if needs_review else 0,
+                    ),
+                )
+            else:
+                c.execute(
+                    """
+                    INSERT INTO security_patches (
+                        changed_function_id, is_security_patch, confidence, vuln_type, cwe,
+                        severity, root_cause, fix_description, fix_category,
+                        attack_vector, requires_auth, attack_surface,
+                        source_desc, sink_desc, missing_check,
+                        known_cve, llm_model, llm_prompt_ver, analyst_id, analysis_raw
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        cf_id, 1 if is_sec else 0, conf,
+                        patch.get("vuln_type"), patch.get("cwe"),
+                        patch.get("severity"),
+                        patch.get("root_cause"), patch.get("fix_description"), patch.get("fix_category"),
+                        patch.get("attack_vector"),
+                        1 if patch.get("requires_auth") else (0 if "requires_auth" in patch else None),
+                        patch.get("attack_surface"),
+                        patch.get("source_desc"), patch.get("sink_desc"), patch.get("missing_check"),
+                        patch.get("known_cve"),
+                        "claude-opus-4-6[1m]", "stage2-drafter-v4", analyst_id,
+                        json.dumps(item, ensure_ascii=False),
+                    ),
+                )
             sp_id = c.lastrowid
             inserted_patches += 1
 
@@ -356,12 +393,93 @@ def cmd_apply(args: argparse.Namespace) -> int:
         for e in errors:
             print(f"  - {e}")
         return 2
+
+    # === v4: 성공하면 tmp 입출력 JSON 자동 삭제 (용량 관리) ===
+    if not args.keep_tmp:
+        removed = 0
+        for out_path in sources:
+            op = Path(out_path)
+            if op.exists():
+                op.unlink()
+                removed += 1
+            # 대응 input 추정: out_s11_a1.json -> in_s11_a1.json
+            name = op.name
+            if name.startswith("out_"):
+                in_candidate = op.parent / ("in_" + name[4:])
+                if in_candidate.exists():
+                    in_candidate.unlink()
+                    removed += 1
+            # 대응 통합 input도 삭제: in_s11.json (a1/a2 prefix 없는 것)
+            # 샤드 이름에서 _aN 떼서 base 도출
+            import re as _re
+            m = _re.match(r"out_(.*?)_a\d+\.json$", name)
+            if m:
+                base_input = op.parent / f"in_{m.group(1)}.json"
+                if base_input.exists():
+                    base_input.unlink()
+                    removed += 1
+        if removed:
+            print(f"[apply] cleaned {removed} tmp json(s). (--keep-tmp to preserve)")
     return 0
 
 
 # =============================================================================
 # main
 # =============================================================================
+
+def cmd_reset(args: argparse.Namespace) -> int:
+    """Stage 2 전체 리셋: security_patches + pattern_cards + 부속 테이블 전부 삭제,
+    changed_functions.stage2_status의 drafted_*/drafting_* → prefiltered_in로 복구.
+    Phase 0 상태(skipped_oss/prefiltered_out)는 유지.
+    """
+    if not args.yes:
+        print("[reset] --yes 필요. 안전장치.", file=sys.stderr)
+        return 1
+    conn = sqlite3.connect(args.db)
+    c = conn.cursor()
+
+    sp_n = c.execute("SELECT COUNT(*) FROM security_patches").fetchone()[0]
+    pc_n = c.execute("SELECT COUNT(*) FROM pattern_cards").fetchone()[0]
+    hf_n = c.execute("SELECT COUNT(*) FROM hunt_findings").fetchone()[0]
+    print(f"[reset] before: security_patches={sp_n}, pattern_cards={pc_n}, hunt_findings={hf_n}")
+
+    # 부속 테이블은 ON DELETE CASCADE가 있으므로 pattern_cards만 비우면 자동 따라옴.
+    # 하지만 명시적으로도 정리 — 안전하게.
+    c.execute("DELETE FROM hunt_findings")
+    c.execute("DELETE FROM pattern_card_stats")
+    c.execute("DELETE FROM pattern_card_members")
+    c.execute("DELETE FROM pattern_card_grep_patterns")
+    c.execute("DELETE FROM pattern_card_negative_tokens")
+    c.execute("DELETE FROM pattern_card_tokens")
+    c.execute("DELETE FROM pattern_cards")
+    c.execute("DELETE FROM security_patches")
+
+    # stage2_status 복구: drafted_*/drafting_*/error → prefiltered_in
+    c.execute(
+        """
+        UPDATE changed_functions
+        SET stage2_status = 'prefiltered_in'
+        WHERE stage2_status IN ('drafting_a1','drafting_a2','drafting_a3','drafting_a4',
+                                 'drafted_sec','drafted_nonsec','error')
+        """
+    )
+
+    # sqlite_sequence 리셋 (AUTOINCREMENT 카운터 — card_id P-001부터 다시 시작하려면)
+    c.execute("DELETE FROM sqlite_sequence WHERE name IN ('pattern_cards', 'security_patches', 'hunt_findings', 'pattern_card_tokens', 'pattern_card_negative_tokens', 'pattern_card_grep_patterns', 'pattern_card_members', 'pattern_card_stats')")
+
+    conn.commit()
+
+    print("[reset] done.")
+    print("[reset] after:")
+    for tbl in ("security_patches", "pattern_cards", "hunt_findings"):
+        n = c.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+        print(f"  {tbl}: {n}")
+    print("[reset] stage2_status 분포:")
+    for s, n in c.execute("SELECT stage2_status, COUNT(*) FROM changed_functions GROUP BY stage2_status ORDER BY 2 DESC"):
+        print(f"  {s}: {n:,}")
+    conn.close()
+    return 0
+
 
 def cmd_resume(args: argparse.Namespace) -> int:
     """중단된 세션 복구. drafting_a1/a2 상태인데 security_patches에 없는 레코드를
@@ -537,6 +655,10 @@ def main() -> int:
 
     p2 = sub.add_parser("apply", help="Drafter 출력 DB 반영 (1개 또는 여러 파일)")
     p2.add_argument("output_jsons", nargs="+", help="out_*.json 파일 1개 이상")
+    p2.add_argument("--keep-tmp", action="store_true", help="apply 후 tmp in_*/out_* 자동 삭제 끄기")
+
+    p6 = sub.add_parser("reset", help="Stage 2 전체 리셋 (security_patches + pattern_cards 등 삭제)")
+    p6.add_argument("--yes", action="store_true", help="안전장치 — 실제 삭제하려면 --yes 필수")
 
     p5 = sub.add_parser("split", help="prepare 산출물을 N 샤드로 쪼개서 병렬 Agent 배분")
     p5.add_argument("input", help="prepare로 만든 in_*.json")
@@ -558,6 +680,8 @@ def main() -> int:
         return cmd_next_batch_info(args)
     elif args.cmd == "split":
         return cmd_split(args)
+    elif args.cmd == "reset":
+        return cmd_reset(args)
     return 1
 
 
