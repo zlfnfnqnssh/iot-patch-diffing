@@ -5,16 +5,31 @@ __pycache__/
 *.pyd
 
 # Local tooling and editor state
-.claude/
+.claude/*
+# 팀 공유 대상은 git 추적 (개별 예외)
+!.claude/skills/
+!.claude/skills/**
+!.claude/agents/
+!.claude/agents/**
+!.claude/commands/
+!.claude/commands/**
+!.claude/settings.json
+# .claude/settings.local.json 은 개인 설정이라 계속 무시됨
 /--help
 
 # Analysis inputs / outputs
 /data/*
 !/data/.gitkeep
+# 팀 핸드오프 문서는 git 추적
+!/data/handoff/
+/data/handoff/artifacts/
 /logs/
 /output/*
 !/output/.gitkeep
 /results/
+
+# 개인 임시 작업 파일
+/tmp/
 
 # Reports: keep reusable tooling, skip generated outputs and personal notes
 /report/__pycache__/

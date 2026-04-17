@@ -1,22 +1,24 @@
-# 파이프라인 개발 과정
+# 파이프라인 설계
 
 > 설계 원칙은 [architecture-decisions.md](architecture-decisions.md) 참고
 
-## 전체 구조 (확정 2026-03-25, 운영 업데이트 2026-04-02)
+## 전체 구조 (확정 2026-03-25, DB 통합 2026-04-02)
 
 ```
 펌웨어 A (old) ─┐
                 ├─ Stage 0: 펌웨어 추출 + 해시 디핑
-펌웨어 B (new) ─┘       ↓ changed_files
-                   Stage 1: BinDiff + 전체 디컴파일 → DB
-                        ↓ changed_functions
+펌웨어 B (new) ─┘       ↓ changed_files (DB)
+                   Stage 1: BinDiff + 전체 디컴파일
+                        ↓ changed_functions (DB + JSON 캐시)
                    Stage 2: LLM 1-pass 전수 분석
-                        ↓ security_patches
+                        ↓ security_patches (DB)
                    Stage 3: 0-day 헌팅
-                        ↓ hunt_findings
+                        ↓ hunt_findings (DB)
 ```
 
 Stage 0~1은 여러 벤더를 상대로 반복 실행하고, Stage 2는 충분한 코퍼스가 모인 뒤 일괄 수행한다.
+`bindiff_pipeline.py`에 `--vendor`, `--model`, `--old-ver`, `--new-ver`를 전달하면 JSON 출력과 동시에 DB에 자동 저장된다.
+`sequential_diff.py`는 firmware 디렉토리명에서 vendor/model을 자동 감지해 pipeline에 전달한다.
 
 ## Stage 0: 펌웨어 추출 + 해시 디핑
 
@@ -97,29 +99,56 @@ function_diffs/ubnt_cgi/
 변경 함수는 old/new pseudocode 쌍과 함께 `changed_functions` 테이블에 저장한다.
 비보안 함수도 저장해 분모 데이터와 재분석 기반으로 활용한다.
 
-## Stage 2: LLM 1-pass 전수 분석
+## Stage 2: LLM 3-Phase 분석 (2026-04-17 v3 확정, 오케스트레이션은 `.claude/skills/stage2/`)
 
-현재 설계는 BinDiff가 이미 뽑은 변경 함수 전체를 대상으로 LLM이 한 번에 분류와 분석을 수행하는 방식이다.
+Stage 2는 Drafter 단일 Phase로 판정과 카드 작성을 한 번에 수행한다. 오케스트레이션 스킬(`/stage2`)이 프롬프트, 스키마, SQL을 제공한다.
 
-출력 필드는 다음을 포함한다.
+```
+Phase 0. 사전 필터 (Python)    : OSS 바이너리/similarity/키워드로 27K→~1.5K
+Phase 1. Drafter (A1·A2 병렬)  : 보안 판정 + 패턴카드 작성 동시 수행
+                                 → security_patches + pattern_cards(+ 부속) 동시 INSERT
+                                 같은 공식 카드는 Auto-merge로 pattern_card_members에 흡수
+Phase 2. Hunter H (Opus)       : 타겟 펌웨어 함수 × 카드 1:N 매칭
+```
 
-- `is_security_patch`
-- `severity`
-- `confidence`
-- `vuln_type`
-- `cwe`
-- `root_cause`
-- `fix_description`
-- `source_desc`
-- `sink_desc`
-- `missing_check`
-- `hunt_strategy`
+2026-04-17 이전 초안은 Analyst / Reviewer / Designer를 분리한 5-Phase 구조였다. 팀 논의에서 토큰/쿼터 부담과 맥락 중복을 이유로 단일 Drafter로 통합했다. 상세 근거는 [architecture-decisions.md §13](architecture-decisions.md) 참고.
 
-운영 순서는 다음과 같다.
+Drafter 출력은 다음 두 섹션을 함께 포함한다.
+
+- `patch_record` (security_patches 용): `is_security_patch`, `confidence`, `vuln_type`, `cwe`, `severity`, `root_cause`, `fix_description`, `fix_category`, `source_desc`, `sink_desc`, `missing_check`, `attack_vector`, `attack_surface`, `requires_auth`, `known_cve`
+- `card_draft` (보안 패치일 때만, pattern_cards + 부속 용): `source_type`, `source_detail`, `sink_type`, `sink_detail`, `missing_check`, `summary`, `vulnerable_snippet`, `fixed_snippet`, `snippet_origin`, `long_description`, `attack_scenario`, `fix_detail`, `severity_hint`, `cve_similar`, `tokens[]`, `grep_patterns[]`, `negative_tokens[]`
+
+운영 순서:
 
 1. 여러 벤더에 대해 Stage 0~1 결과를 먼저 축적한다.
-2. 누적된 `changed_functions` 집합을 기준으로 Stage 2를 배치 실행한다.
-3. 결과를 `security_patches` 테이블에 전수 저장한다.
+2. 누적된 `changed_functions`에 대해 `sql/prefilter.sql` + Python 키워드 필터를 돌려 입력 큐를 줄인다.
+3. Drafter A1(vendor 바이너리) / A2(그 외)를 Agent 서브에이전트로 병렬 실행한다.
+4. 오케스트레이터가 Drafter 출력을 DB에 저장하면서 같은 공식 active 카드 존재 시 Auto-merge로 `pattern_card_members` 추가, 없으면 신규 카드 INSERT.
+5. Hunter가 타겟 펌웨어의 함수 F에 대해 후보 카드와 1:N 매칭 → `hunt_findings`.
+6. 사람이 `is_true_positive` 확정 → `pattern_card_stats.precision` 갱신 → 필요 시 retire.
+
+### 패턴카드 설계 (2026-04-17 확정, v2 포맷 / v3 워크플로우)
+
+패턴카드는 벤더·CWE 라벨이 아니라 **구조적 taint 공식 + 핵심 코드 스니펫**으로 저장한다. 상세 설계는 [architecture-decisions.md §12](architecture-decisions.md) 참고.
+
+카드 본체 필드:
+
+- 공식 3원소: `source_type`, `missing_check`, `sink_type` (+ 각 detail)
+- LLM 직접 입력: `summary` (200자), `vulnerable_snippet` (OLD 5~15줄), `fixed_snippet` (NEW 5~15줄), `snippet_origin`
+- 인간 전용: `long_description`, `attack_scenario`, `fix_detail`
+- 참고 라벨: `severity_hint`, `cve_similar`, `advisory`
+- 수명주기: `status`, `version`, `superseded_by`
+- 공유: `shared_with_team`, `shared_batch_id`
+
+부속 테이블:
+
+- `pattern_card_tokens` — grep 인덱스 (api/literal/error_msg/const/struct_field)
+- `pattern_card_negative_tokens` — safe wrapper 배제 (`vendor_scope`로 벤더 범위 지정)
+- `pattern_card_grep_patterns` — regex (선택)
+- `pattern_card_members` — 파생 `security_patches` 추적
+- `pattern_card_stats` — TP/FP 집계, precision 관리
+
+Phase 5 전처리가 함수 F에서 토큰/enum을 추출해 공식 3원소 + 토큰 인덱스로 후보 카드 1~5장을 컷하며, LLM 호출 전에 99% 축소한다. Hunter는 후보 카드의 `vulnerable_snippet`과 F의 모양을 비교해 1차 매칭하고, `fixed_snippet`과 동형이면 이미 패치됐다고 보고 FP로 내린다.
 
 ## Stage 3: 0-day 헌팅
 
@@ -146,6 +175,23 @@ function_diffs/ubnt_cgi/
 - 상위 폴더를 주면 하위 모델 디렉터리를 재귀 탐색한다.
 - 결과는 `output/<모델>/v<old>_vs_v<new>/`에 저장한다.
 - `function_diff_stats.json`이 있으면 해당 pair를 건너뛴다.
+- `--vendor`, `--model`을 지정하거나, 경로에서 자동 감지한다.
+- DB 저장은 기본 활성화이며, `--no-db`로 끌 수 있다.
+
+### `src/tools/import_existing_output.py`
+
+- 기존 output 디렉토리의 JSON 결과를 PipelineDB로 일괄 import한다.
+- `--output-root`, `--vendor`, `--model-filter`, `--db-path`, `--dry-run` 옵션을 지원한다.
+- hash_compare.json, diff_results.json, functions/*.json을 파싱해 DB에 저장한다.
+
+### `src/analyzers/rebuild_bindiff_from_exports.py`
+
+- 이미 `functions/`와 `binexport/`가 있는 output pair 디렉터리에서 BinDiff만 다시 수행한다.
+- 기본 스캔 경로는 `output/dahua/<model>/v<old>_vs_v<new>/` 형태를 가정한다.
+- `bindiff/`, `function_diffs/`, `diff_results.json`, `function_diff_stats.json`, `summary.md`를 다시 생성한다.
+- old/new JSON 또는 `.BinExport`가 없는 바이너리는 건너뛴다.
+- 이 스크립트는 output 재생성 전용이며, DB는 갱신하지 않는다. DB 반영이 필요하면 `import_existing_output.py`를 별도로 실행한다.
+- 기존 export 자체가 함수 0개로 저장된 pair는 재실행해도 `changed_functions = 0` 결과가 유지된다.
 
 ### `src/analyzers/download_iptime_firmware.py`
 
@@ -172,15 +218,82 @@ function_diffs/ubnt_cgi/
 
 ## SQLite DB 구조
 
+DB 파일: `Patch-Learner-main/src/db/patch_learner.db`
+
 ```
-src/db/patch_learner.db
-├── firmware_versions
-├── diff_sessions
-├── changed_files
-├── bindiff_results
-├── changed_functions
-├── security_patches
-└── hunt_findings
+firmware_versions          제조사/모델/버전 레지스트리
+    ↓
+diff_sessions              버전 쌍 비교 단위 (status: pending→hash_diffed→bindiffed→analyzed)
+    ↓
+changed_files              파일 레벨 변경 (binary/text, 크기)
+    ↓
+bindiff_results            바이너리별 BinDiff 통계 (유사도 %)
+    ↓
+changed_functions          함수별 old/new pseudocode 포함
+    ↓
+security_patches           LLM 보안 판단 (Stage 2에서 채워짐)
+    ↓
+hunt_findings              0-day 후보 관리 (Stage 3)
+
+pattern_cards              재사용 가능한 취약점 패턴 (v2: 공식 + 스니펫 중심)
+  ├─ pattern_card_tokens             grep/prefilter 인덱스
+  ├─ pattern_card_negative_tokens    safe wrapper 배제 (vendor_scope)
+  ├─ pattern_card_grep_patterns      regex (선택)
+  ├─ pattern_card_members            security_patches 파생 추적
+  └─ pattern_card_stats              TP/FP 집계 + precision
+```
+
+### Stage 2 상태 컬럼 (2026-04-17 migration 적용 시)
+
+- `changed_functions.stage2_status` : pending/skipped_oss/prefiltered_in/analyzing_aN/analyzed_aN/error
+- `security_patches.analyst_id, review_status, reopen_count, reviewer_note, reopen_reason`
+- `security_patches.pattern_group_id, is_group_representative, phase4_status`
+- `hunt_findings.pattern_card_id, target_function_id, match_confidence, match_lines, matched_formula, is_true_positive, notes`
+
+### DB 현황 (2026-04-06)
+
+| 테이블 | 건수 |
+|--------|------|
+| firmware_versions | 271 |
+| diff_sessions | 237 |
+| changed_files | 5,578 |
+| bindiff_results | 2,825 |
+| changed_functions | 67,104 |
+| security_patches | 0 |
+
+### 벤더별 누적 현황 (2026-04-06)
+
+| vendor | sessions | changed_files | bindiff_results | changed_functions |
+|--------|----------|---------------|-----------------|-------------------|
+| dahua | 198 | 3,806 | 2,020 | 55,049 |
+| tp-link | 39 | 1,772 | 805 | 12,055 |
+
+## CLI 사용법
+
+### 단일 실행 (DB 저장 포함)
+```bash
+python src/analyzers/bindiff_pipeline.py \
+    --old data/firmware/tapo_C200/C200v1/old.bin \
+    --new data/firmware/tapo_C200/C200v1/new.bin \
+    --vendor tp-link --model Tapo_C200v1 --old-ver 1.0.2 --new-ver 1.0.3
+```
+
+### 순차 자동 실행 (vendor/model 자동 감지)
+```bash
+python src/analyzers/sequential_diff.py \
+    --firmware-dir data/firmware/tapo_C200
+```
+
+### 기존 결과 일괄 DB import
+```bash
+python src/tools/import_existing_output.py \
+    --output-root output/ --dry-run
+```
+
+### 기존 Dahua export 기준 BinDiff 재생성
+```bash
+python src/analyzers/rebuild_bindiff_from_exports.py \
+    --output-root output/dahua
 ```
 
 ## 현재 제약사항

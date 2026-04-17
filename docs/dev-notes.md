@@ -4,6 +4,90 @@
 
 ---
 
+### 2026-04-17 (오후) | Stage 2 워크플로우 Drafter 단일 Phase로 통합 (Reviewer 제거)
+
+**배경:**
+
+- 오전에 확정한 5-Phase 구조(사전필터/Analyst/Reviewer/Dedupe/Designer/Hunter)를 팀원이 재검토.
+- 팀원 의견: "검증 단계를 두지 말고 패턴카드 포맷으로 쌓으면서 훑는 식이 더 효율 좋을 듯. 토큰이랑 품질 둘 다 챙길 수 있을 듯."
+- 합의: Reviewer 제거 + Analyst/Designer를 Drafter 단일 Phase로 통합.
+
+**결정 이유:**
+
+1. **토큰/쿼터 60% 절감** — 한 함수당 LLM 호출 3회 → 1회. Claude Max 5시간 쿼터 내 처리량 ~3배.
+2. **맥락 손실 제거** — 같은 함수를 Analyst·Reviewer·Designer가 각각 다시 읽던 중복 제거.
+3. **Echo chamber 자연 해소** — Reviewer 없으므로 같은 Opus가 자기 답 승인하는 구조 자체가 사라짐.
+4. **security_patches 스키마에 이미 공식 필드 존재** — `source_desc`/`sink_desc`/`missing_check`. 판정과 카드 작성을 분리할 이유가 없었음.
+
+**변경된 파일:**
+
+- `.claude/skills/stage2/prompts/drafter.md` (신규) — analyst.md + designer.md 통합. 판정 + 카드 draft 동시 출력.
+- `.claude/skills/stage2/prompts/analyst.md`, `reviewer.md`, `designer.md` 삭제.
+- `.claude/skills/stage2/prompts/hunter.md` 갱신 — Phase 5 → Phase 2로 위치 이동, v3 구조 언급.
+- `.claude/skills/stage2/SKILL.md` — 3-Phase(사전필터 / Drafter / Hunter)로 재구성.
+- `.claude/skills/stage2/sql/migration.sql`:
+  - `review_status` / `reopen_count` / `reviewer_note` / `reopen_reason` 컬럼 제거.
+  - `stage2_status` enum: `drafting_a1/a2 → drafted_sec / drafted_nonsec`.
+  - `pattern_cards`에 부분 UNIQUE INDEX `idx_pc_formula_active` 추가 — 같은 공식의 active 카드 중복 DB 레벨 차단.
+  - `security_patches.pattern_card_id` FK 컬럼 추가.
+- `.claude/skills/stage2/sql/dedupe.sql` — Phase 3 수동 Dedupe 쿼리 → Auto-merge 사후 점검 쿼리로 전환.
+- `.claude/skills/stage2/sql/dashboard.sql` — Reviewer 지표 제거, Drafter confidence 분포 + Auto-merge 효과 + precision 품질 대시보드로 재구성.
+- `docs/architecture-decisions.md` §13 추가 (Drafter 통합 결정 근거).
+- `docs/pipeline.md` Stage 2 섹션 3-Phase로 갱신.
+- `docs/pattern-card-spec.md` — status 전이 v3 반영 (생성 시 바로 active, draft 단계 없음), Auto-merge 설명, FAQ Q9/Q10 추가.
+
+**FP 가드 3층 구조 (Reviewer 부재 보상):**
+
+1. Drafter 프롬프트에 False Positive 가드 7종 + Synology Hard Rules + confidence 기준표 하드코딩. confidence 0.70 미만은 기본 `is_security_patch=false`.
+2. Auto-merge로 같은 공식 카드 수렴 — 드문 오류가 카드 폭발로 이어지지 않음.
+3. Hunter 결과 사람 검토 → `pattern_card_stats.precision` 하락 시 retire 게이트 자동 진입.
+
+**다음 액션:**
+
+- DB 백업 후 `migration.sql` 적용 (pattern_cards 0건이라 안전).
+- Phase 0 Python 사전 필터 스크립트 작성 (`src/stage2/prefilter.py`).
+- 오케스트레이터 스크립트 작성 (`src/stage2/drafter_run.py`) — Drafter Agent 호출 + Auto-merge SQL 실행.
+- BC500 v1.0.5→v1.0.6 16건으로 Drafter 파일럿 실행. confidence 분포와 카드 품질 확인 후 프롬프트 튜닝.
+- TP-Link Tapo C200v1 (12,055 함수) Phase 0~1 착수.
+
+---
+
+### 2026-04-17 (오전) | Stage 2 오케스트레이션 스킬 추가 + 패턴카드 v2 재설계
+
+**배경:**
+
+- 팀 회의(2026-04-16)에서 Stage 2를 5-Phase 워크플로우(사전필터/Analyst/Reviewer/Dedupe/Designer/Hunter)로 확정.
+- 첫 시도로 벤더·CWE 라벨 중심 패턴카드 스키마를 만들었으나 두 가지 문제 노출:
+  1. 같은 공식(예: HTTP Host 헤더 길이 미검증)이 Dahua/ipTIME 등 여러 벤더에서 반복되는데 벤더 라벨이 매칭을 가두는 부작용.
+  2. 카드가 늘어나면 Hunter LLM에 넣을 토큰이 폭발 (카드당 서사 설명이 커서).
+
+**결정:**
+
+- 패턴카드 본체를 **구조적 taint 공식 3원소**(`source_type` / `missing_check` / `sink_type`) + **OLD/NEW 핵심 스니펫**으로 재설계.
+- 벤더/CWE 라벨 필드 제거. `severity_hint`, `cve_similar`는 검색 편의용 메타로만 유지.
+- 부속 테이블 분리: `pattern_card_tokens` (grep 인덱스), `pattern_card_negative_tokens` (safe wrapper 배제, `vendor_scope`), `pattern_card_grep_patterns`, `pattern_card_members`, `pattern_card_stats` (TP/FP precision).
+- Hunter는 카드 shortform(~200 토큰)을 받아 `vulnerable_snippet` 동형 매칭 + `fixed_snippet` 동형 시 배제.
+- 전처리가 공식 3원소 + 토큰 인덱스로 후보 카드를 99% 컷 → 함수당 LLM 입력 ~1,000 토큰 유지.
+
+**결과물:**
+
+- `.claude/skills/stage2/` — SKILL.md, `prompts/` (analyst/reviewer/designer/hunter), `rules/hard-rules.md`, `sql/` (migration/prefilter/dedupe/dashboard).
+- `sql/migration.sql`: 기존 `pattern_cards` DROP + 재생성 (0건 상태라 안전). 부속 6개 테이블 신규.
+- 문서 갱신: `docs/architecture-decisions.md` §12, `docs/pipeline.md` Stage 2 섹션.
+
+**DB 현황 (마이그레이션 이전):**
+
+- `pattern_cards` 0건, `security_patches` 0건, `hunt_findings` 0건 — 재설계 적용에 데이터 이동 부담 없음.
+
+**다음 액션:**
+
+- 마이그레이션 적용 전 DB 스냅샷 백업 (`patch_learner.db.bak.pre-stage2-v2`).
+- Phase 0 Python 사전 필터 스크립트 작성 (`src/stage2/prefilter.py`).
+- BC500 v1.0.5→v1.0.6 16건으로 Analyst + Reviewer 파일럿 실행해 프롬프트 튜닝.
+- 프롬프트 확정 후 TP-Link Tapo C200v1 (12,055 함수) Phase 1 착수.
+
+---
+
 ### 2026-03-09 ~ 03-12 | 초기 설계 및 IDAPython 방식 시도
 
 **진행 내용:**
@@ -619,3 +703,86 @@ python bindiff_pipeline.py --old fw_old/ --new fw_new/ \
 ```
 
 **파일명 참고:** 같은 버전에 타임스탬프만 다른 파일이 여러 개 있음 (예: `_1569812112373.bin` vs `_1572226147854.bin`). 버전 번호가 같으면 내용 동일 — 아무거나 하나만 사용.
+
+---
+
+### 2026-04-09 | Dahua 코퍼스 DB 적재 + DB 현황 정리
+
+**진행 내용:**
+
+1. **Dahua 198개 version pair 일괄 DB import**
+   - `src/tools/import_existing_output.py`의 버전 정규식을 4-part(`v2.860.0.13` 형식)까지 매칭하도록 수정 (`^v([\d.]+)_vs_v([\d.]+)$`)
+   - VENDOR_MAP에 `dh_ipc`, `dahua`, `ezip` 키워드 추가
+   - 기존 import 로직이 Stage 0에서 저장된 파티션 레벨 `changed_files`(`zip_contents/romfs-x.squashfs.img`)와 BinDiff 결과의 rootfs 레벨 basename(`aewDebug`)이 매칭 안 돼 `changed_functions`가 0건으로 남던 문제 수정
+   - `ensure_changed_file()` / `ensure_bindiff_result()` 헬퍼 추가: `_get_changed_file_id`로 매칭 실패 시 `diff_results.json`의 basename 기준으로 직접 INSERT
+
+2. **DB 현황 (2026-04-09 기준)**
+   ```
+   firmware_versions      271
+   diff_sessions          237
+   changed_files        5,578
+   bindiff_results      2,825
+   changed_functions   67,104
+   security_patches         0
+   pattern_cards            0
+   hunt_findings            0
+   ```
+   - dahua: 198 세션 / 3,806 changed_files / 2,020 bindiff_results / **55,049 changed_functions**
+   - tp-link: 39 세션 / 1,772 changed_files / 805 bindiff_results / **12,055 changed_functions**
+
+3. **Dahua 펌웨어 32개 모델 분류 (DH-ZIP 추출 결과)**
+   - 추출 가능: 15개 모델 (구형, SquashFS/CramFS 직접 노출)
+   - 암호화: 17개 모델 / 약 155개 .bin (내부 .img 첫 4KB 엔트로피 256/256)
+     - HX18XX-Molec, HX1XXX-Edison2, HX1XXX-Hertz×2, HX1XXX-Kant, HX1XXX-Molec, HX2(1)XXX-Edison, HX25(8)XX-Molec, HX2XXX-Kant, HX2XXX-Molec, HX3XXX-Dalton, HX3XXX-Leo, HX3XXX-Taurus, HX4XXX-Volt, HX5(4)(3)XXX-Leo, HX5XXX-Volt, EZIP-Leto
+
+4. **Dahua 복호화 도구 조사**
+   - 공개 end-to-end 복호화 도구는 없음. 외곽 DH-ZIP 컨테이너만 처리하는 도구가 전부
+   - 정리:
+     - `BotoX/Dahua-Firmware-Mod-Kit` — DH→PK 헤더 패치 + uImage strip + SquashFS unpack. 구형 펌웨어 한정. AES 페이로드는 못 푼다.
+     - `mcw0/Tools` (`DahuaConfigBackupDecEnc.py`) — 기기 config backup 전용 (펌웨어 .img 아님)
+     - `mcw0/DahuaConsole` — DHIP 기반 디버그 콘솔 접근
+     - Nozomi Networks / Tarlogic — 부트로더에서 키 추출 후 에뮬레이션, 코드 미공개
+     - CDDC Finals 2025 CTF writeup — Unicorn으로 `SecUnit_*` 함수 에뮬레이트해 AES-CBC-512 페이로드 복호화 (`ssc325` SoC 기준), 스크립트 미공개
+   - 결론: 신형(암호화) 17개 모델은 모델별 부트로더/커널 리버싱이 필요. 일반화 불가.
+
+---
+
+### 2026-04-09 | ipTIME 펌웨어 코퍼스 확보 + 추출 방식 검증
+
+**진행 내용:**
+
+1. **ipTIME 카메라 펌웨어 다운로드 완료**
+   - 약 1,800개 .bin 확보 (ipTIME 카메라 라인 전체)
+   - `data/firmware/iptime/` 적재 작업은 별도 진행 예정
+
+2. **암호화 여부 조사 결론: 복호화 불필요**
+   - ipTIME 라우터 펌웨어는 평문 SquashFS (LZMA) 구조로 잘 알려져 있음
+   - OpenWrt 포팅(예: `stypr/openwrt-iptime` AX3000M), Pierre Kim의 9.52 PoC, 다수 RCE 연구가 모두 binwalk 직접 추출 전제로 작성됨
+   - 카메라/NVR도 EFM Networks가 같은 빌드 시스템을 재사용하므로 동일 패턴으로 추정 (별도 헤더/AES 래퍼 보고 사례 없음)
+   - 결론: **`binwalk -Me firmware.bin` 한 번으로 추출 가능 → tp-link-decrypt 같은 전처리 스텝 불필요**
+
+3. **권장 추출 절차**
+   ```bash
+   # 1차: 엔트로피 확인 (평탄한 0.95면 암호화 의심)
+   binwalk -E firmware.bin
+
+   # 2차: 헤더가 낮고 SquashFS 구간만 높으면 평문이므로 바로 추출
+   binwalk -Me firmware.bin
+   ```
+   - 기존 `bindiff_pipeline.py`의 `binwalk -e` (WSL) 경로가 그대로 동작할 것으로 예상
+   - 카메라/NVR `.bin`만 별도로 첫 추출 한 번 돌려 확인 후 본격 디핑 진입
+
+4. **참고: 알려진 ipTIME 관련 reverse engineering 자산**
+   - `hackintoanetwork/ipTIME-Router-9.58-RCE-PoC` — pre-auth RCE
+   - `ddkani/iptime-debug`, `live2skull/iptime-debug` — 9.72까지 셸 진입
+   - `DePierre/iptime_utils` — config backup 언팩
+   - `stypr/openwrt-iptime` — AX3000M OpenWrt 포팅 (평문 SquashFS 확인 근거)
+   - Pierre Kim 2015 ipTIME 9.52 advisory — 커널 메모리 릭
+   - **CVE-2025-55423** — 163개 라우터 모델 영향, `upnp_relay()` (`/lib/libcgi.so`) UPnP command injection, 인증 없이 root RCE
+   - **카메라/NVR 전용 공개 연구는 사실상 없음** — 코퍼스가 이미 확보된 상태에서 카메라 라인을 분석하면 신규 발견이 가능한 영역
+
+5. **다음 액션**
+   - `data/firmware/iptime/` 디렉터리 정리 (모델별 폴더링)
+   - 카메라 `.bin` 우선 1~2개 추출 테스트로 평문 가설 검증
+   - 평문 확인되면 `sequential_diff.py`에 ipTIME vendor 키워드 추가 후 일괄 디핑 시작
+   - 1,800개 카메라 펌웨어 → 수백 개 version pair, Stage 0~1 코퍼스가 단숨에 확장됨
