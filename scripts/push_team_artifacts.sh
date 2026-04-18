@@ -27,6 +27,7 @@ TEAM_PATHS=(
   "docs/dev-notes.md"
   "docs/stage2-runbook.md"
   "data/handoff/"
+  "data/cve/"
   "src/stage2/"
   "scripts/push_team_artifacts.sh"
   "CLAUDE.md"
