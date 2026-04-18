@@ -23,6 +23,8 @@ __pycache__/
 # 팀 핸드오프 문서는 git 추적
 !/data/handoff/
 /data/handoff/artifacts/
+# CVE ground truth (팀장 공유용)
+!/data/cve/
 /logs/
 /output/*
 !/output/.gitkeep
