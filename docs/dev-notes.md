@@ -4,6 +4,93 @@
 
 ---
 
+### 2026-04-19 | Stage 2 Drafter 배치 4건 + CVE-2025-31700 블라인드 탐지 성공 + 팀장 handoff + Zero-Day 플랜 승인
+
+**배경:**
+
+오늘 세션 세 축으로 진행.
+1. Stage 2 Drafter 배치 계속 돌려 pattern_cards / security_patches 누적.
+2. cve-2025-31700.md 의 Dahua CVE를 "외부 지식 없이 우리 파이프라인이 찾을 수 있는가" 실제 테스트.
+3. 팀장이 `data/cve/ground_truth.jsonl` + `security_patches_session.jsonl` 요청 → 핸드오프.
+4. 실패한 부분을 보완하기 위해 **Zero-Day 블라인드 헌트 + 웹 대시보드** 플랜 확정.
+
+**Stage 2 배치 결과 (4건, 565 funcs 처리):**
+
+| 배치 | 세션 | 타겟 | 처리 | sec | 카드 신규 | auto-merge |
+|---|---|---|---|---|---|---|
+| 1 | s11 | tp-link Tapo_C200v1 v1.0.7→v1.0.10 | 200 | 0 | 0 | 0 |
+| 2 (A4만) | s105 | dahua Molec v2.800.0.16→v2.840.0.5 | 50 | 5 | 2 | 3 |
+| 3 | s536 | ipTIME a6004mx v68→v70 | 165 | 12 | 10 | 2 |
+| 4 (sonia 1차) | s74 | dahua Kant v2.860.0.31→v2.860.0.34 | 200 | 1 | 1 (P-074) | 0 |
+
+DB 상태 변화: `pattern_cards` 73 → **74**, `security_patches` 1,815 → **2,016**, `hunt_findings` 1,746 → **7,412** (Hunter 재실행 포함).
+
+**CVE-2025-31700 블라인드 탐지 테스트:**
+
+Dahua Kant v2.860.0.31 vs v2.860.0.34 `sonia` 바이너리(ONVIF/HTTP/RPC 통합 데몬). 심볼 stripped. 변경 함수 7,442개 중 ins≥10인 2,681개 디컴파일 → DB 등록 → 프리필터 381개 → Drafter 200개 배치.
+
+Drafter가 `sub_38F9F4` (HTTP 헤더 파서)를 CVE 문서 비열람 상태에서 다음과 같이 식별:
+- source = `Host:` HTTP 헤더 (attacker-controlled)
+- sink = 256B 스택 버퍼 `strncpy`
+- missing_check = length_bound
+- `hard-rules.md §5` 패밀리 매칭 → **cve_similar="CVE-2025-31700"** 자동 기입, confidence 0.78, severity=high
+- 카드 P-074 생성: `http_header → stack_buffer_copy + length_bound`
+
+Hunter P-074 카드로 전체 코퍼스 재스캔 → 다른 바이너리에서 0 hit. 원인: negative_token `sub_383C98`(Dahua 안전 헬퍼)이 패치된 NEW에 존재해 "이미 패치됨"으로 정확히 제외.
+
+**한계 (실제 CVE 함수는 못 잡음):**
+
+진짜 CVE-2025-31700 위치는 sonia 내부 `ONVIF_HandleRequest`(소스 `Src/OnvifHandler.cpp`)인데, 우리 비교쌍 v2.860.0.31↔.34는 패치 기준일(2025-04-16)을 **하루 차로 스치기만 해서** 해당 함수가 unchanged 집합에 들어가 Drafter가 건드리지 못함. P-074는 같은 파일의 헤더 파서 `sub_38F9F4`를 본 결과. Bitdefender 원문상 정확한 `strchr(']')` + 잘못된 길이 계산 코드는 이 함수가 아님.
+
+추가 확인:
+- sonia 바이너리 문자열 스캔 → `Src/OnvifHandler.cpp`, `Src/RPCSessionManager.cpp`, `/RPC2_UploadFileWithName/*` 존재.
+- `v2.880.0.17` 에만 추가된 `DisableWebAppFileImport` ← CVE-31701 방어 플래그로 추정.
+- v2.880.0.16 ↔ .17 sonia BinExport 2개 완료. BinDiff 직전에 사용자 중단 (Zero-Day 플랜으로 전환 요청).
+
+**팀장 handoff:**
+
+- `data/cve/ground_truth.jsonl` — 3 entries (CVE-2025-31700/31701/KVE-2023-5458). 스키마: cve_id, vendor, model, vuln/patched_version, target_binary/function/address, cvss, cwe, source_kind/sink_kind/missing_check, root_cause_summary, references_url, source.
+- `data/handoff/security_patches_session.jsonl` — 572 rows (10 sessions, 123건 pattern_card_members 연결, Dahua 493 / TP-Link 61 / ipTIME 18). 재생성 스크립트 `src/stage2/export_sp_session_jsonl.py`.
+- `scripts/push_team_artifacts.sh` + `.gitignore` — `data/cve/` 경로 화이트리스트 추가.
+- `origin/main` + `team/riri` 둘 다 push 완료.
+
+**Zero-Day 플랜 승인 (`C:\Users\zlfnf\.claude\plans\shimmying-dreaming-snowflake.md`):**
+
+목표: v2.880.0.16 sonia **전체 함수**에 Drafter Agent를 한 번씩 태워 CVE-2025-31700이 블라인드로 잡히는지 검증 + 향후 실제 제로데이 헌팅에도 쓸 FastAPI 로컬 대시보드.
+
+스코프:
+- `src/stage2/zero_day_run.py` — migrate/init/prefilter/prepare/split/apply/status 오케스트레이터
+- `.claude/skills/stage2/prompts/zero_day_hunter.md` — 블라인드 프롬프트 (CVE 번호 출력 금지, `cve-*.md`/`kve*.md` 파일 읽기 금지, WebSearch/WebFetch 금지)
+- `.claude/skills/stage2/sql/zero_day_migration.sql` — `zero_day_runs` / `zero_day_functions` / `zero_day_verdicts` 3 테이블
+- `ida_user/extract_all_funcs.py` — 전체 바이너리 디컴파일 (changed 아닌 것도)
+- `web/` 신규 (FastAPI + Jinja2 + SSE, localhost:8787) — DB 대시보드 + 카드/세션/findings/zero-day 페이지 + 실시간 진행률
+
+**오늘 생성된 주요 파일:**
+- `data/cve/ground_truth.jsonl`, `data/handoff/security_patches_session.jsonl`
+- `src/stage2/export_sp_session_jsonl.py`, `src/stage2/register_sonia.py`
+- `ida_user/decompile_selected.py`, `ida_user/find_xrefs_and_dump.py`, `ida_user/find_named_funcs.py`
+- `.claude/skills/stage2/sql/zero_day_migration.sql`
+- `.claude/skills/stage2/prompts/zero_day_hunter.md`
+- `output/.../binexport/sonia_*.BinExport` (4개), v2.860 쌍 BinDiff 결과
+
+**Git:**
+```
+4830fd0 handoff: add data/cve/ground_truth.jsonl (3 entries)
+3c77c0e handoff: push script whitelist
+4267429 handoff: CVE ground_truth + security_patches session JSONL
+6cc9344 stage2: session 11 batch #1 done (200 funcs, 0 sec)
+```
+origin/main + team/riri 동기화.
+
+**다음 액션:**
+1. Zero-Day 오케스트레이터 구현 (`src/stage2/zero_day_run.py`).
+2. sonia v2.880.0.16 전체 함수 디컴파일 (~45분 백그라운드).
+3. FastAPI `web/` 스캐폴딩 5페이지 + SSE.
+4. Zero-Day run 1회 실행 → P-074 매칭 또는 ONVIF_HandleRequest 블라인드 검출 검증.
+5. `docs/zero-day-runbook.md` 작성.
+
+---
+
 ### 2026-04-17 (오후) | Stage 2 워크플로우 Drafter 단일 Phase로 통합 (Reviewer 제거)
 
 **배경:**
