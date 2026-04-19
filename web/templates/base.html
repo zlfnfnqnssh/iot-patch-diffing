@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>{% block title %}Patch-Learner Dashboard{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body>
+<header>
+  <div class="logo">Patch-Learner</div>
+  <nav>
+    <a href="/"          class="{% if page=='dashboard' %}active{% endif %}">Dashboard</a>
+    <a href="/cards"     class="{% if page=='cards' %}active{% endif %}">Pattern Cards</a>
+    <a href="/sessions"  class="{% if page=='sessions' %}active{% endif %}">Diff Sessions</a>
+    <a href="/findings"  class="{% if page=='findings' %}active{% endif %}">Hunter Findings</a>
+    <a href="/zero-day"  class="{% if page=='zero_day' %}active{% endif %}">Zero-Day</a>
+  </nav>
+</header>
+<main>
+  {% block content %}{% endblock %}
+</main>
+<footer>
+  <span class="muted">localhost:8787 &middot; read-only SQLite &middot; review endpoints write-enabled</span>
+</footer>
+<script src="/static/app.js" defer></script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

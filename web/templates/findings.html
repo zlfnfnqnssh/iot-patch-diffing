@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Hunter Findings - Patch-Learner{% endblock %}
+{% block content %}
+<h1>Hunter Findings</h1>
+<form id="filter" class="filter-bar">
+  <input type="text" name="card_id" placeholder="card_id (P-NNN)">
+  <input type="text" name="target_binary" placeholder="binary">
+  <input type="number" step="0.05" name="min_score" placeholder="min score" value="0.5">
+  <button type="submit">Apply</button>
+  <span class="muted" id="count"></span>
+</form>
+<table id="findings">
+  <thead>
+    <tr><th>id</th><th>card</th><th>binary</th><th>target</th><th>score</th><th>formula</th><th>function</th><th>addr (new)</th><th>notes</th></tr>
+  </thead>
+  <tbody><tr><td colspan="9" class="muted">로딩 중…</td></tr></tbody>
+</table>
+<script>
+async function load(params) {
+  const qs = new URLSearchParams(params).toString();
+  const d = await fetch('/api/findings?' + qs).then(r => r.json());
+  document.getElementById('count').textContent = `${d.count} findings`;
+  document.querySelector('#findings tbody').innerHTML = d.findings.map(f => `<tr>
+    <td>${f.id}</td>
+    <td><a href="/cards/${f.pattern_card_id}">${f.card_id||'-'}</a></td>
+    <td class="mono small">${f.target_binary||''}</td>
+    <td class="mono small">${(f.target_version||'').slice(0,36)}</td>
+    <td class="num">${f.match_confidence!=null ? f.match_confidence.toFixed(2) : ''}</td>
+    <td class="mono small">${f.matched_formula||''}</td>
+    <td class="mono small">${f.function_name||''}</td>
+    <td class="mono small">${f.new_address||''}</td>
+    <td class="truncate small">${(f.notes||'').slice(0,120)}</td>
+  </tr>`).join('') || `<tr><td colspan="9" class="muted">none</td></tr>`;
+}
+document.getElementById('filter').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const p = {};
+  for (const [k, v] of fd) if (v) p[k] = v;
+  load(p);
+});
+load({min_score: 0.5});
+</script>
+{% endblock %}

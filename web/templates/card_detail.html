@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Card - Patch-Learner{% endblock %}
+{% block content %}
+<p><a href="/cards">← Cards</a></p>
+<h1 id="title">Card #{{ pk }}</h1>
+
+<section id="meta" class="grid-wide"></section>
+
+<section>
+  <h2>Summary</h2>
+  <div id="summary" class="prose"></div>
+</section>
+
+<section>
+  <h2>Long description</h2>
+  <pre id="long_desc" class="prose-block"></pre>
+</section>
+
+<section>
+  <h2>Attack scenario</h2>
+  <pre id="attack" class="prose-block"></pre>
+</section>
+
+<section>
+  <h2>Snippets</h2>
+  <details><summary>Vulnerable</summary><pre id="vuln_snippet" class="code"></pre></details>
+  <details><summary>Fixed</summary><pre id="fix_snippet" class="code"></pre></details>
+</section>
+
+<section>
+  <h2>Tokens / Negative Tokens / Grep</h2>
+  <div class="two-col">
+    <div>
+      <h3>Tokens</h3>
+      <table id="tokens"><thead><tr><th>token</th><th>kind</th><th>w</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div>
+      <h3>Negative tokens</h3>
+      <table id="neg"><thead><tr><th>token</th><th>scope</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+  <h3>Grep patterns</h3>
+  <ul id="grep"></ul>
+</section>
+
+<section>
+  <h2>Members (linked security_patches)</h2>
+  <table id="members">
+    <thead><tr><th>sp_id</th><th>rep</th><th>vendor/model</th><th>old→new</th><th>binary/fn</th><th>addr</th><th>conf</th><th>known_cve</th><th>note</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<script>
+(async () => {
+  const pk = {{ pk }};
+  const c = await fetch(`/api/cards/${pk}`).then(r => r.json());
+  document.getElementById('title').textContent = `${c.card_id} (pk=${pk})`;
+  document.getElementById('meta').innerHTML = `
+    <div class="cell"><div class="k">formula</div><div class="v mono">${c.source_type} → ${c.sink_type}<br>miss: ${c.missing_check}</div></div>
+    <div class="cell"><div class="k">severity</div><div class="v"><span class="sev sev-${c.severity_hint||'unset'}">${c.severity_hint||'-'}</span></div></div>
+    <div class="cell"><div class="k">status</div><div class="v">${c.status}</div></div>
+    <div class="cell"><div class="k">cve_similar</div><div class="v mono">${c.cve_similar||'-'}</div></div>
+    <div class="cell"><div class="k">snippet_origin</div><div class="v mono small">${c.snippet_origin||'-'}</div></div>
+    <div class="cell"><div class="k">hunt findings</div><div class="v">${c.hunt_findings_count}</div></div>
+    <div class="cell"><div class="k">zero_day verdicts</div><div class="v">${c.zero_day_verdicts_count}</div></div>
+    <div class="cell"><div class="k">shared_with_team</div><div class="v">${c.shared_with_team ? 'yes' : 'no'}</div></div>
+  `;
+  document.getElementById('summary').textContent = c.summary || '';
+  document.getElementById('long_desc').textContent = c.long_description || '';
+  document.getElementById('attack').textContent   = c.attack_scenario || '';
+  document.getElementById('vuln_snippet').textContent = c.vulnerable_snippet || '';
+  document.getElementById('fix_snippet').textContent  = c.fixed_snippet || '';
+
+  document.querySelector('#tokens tbody').innerHTML = (c.tokens||[]).map(t =>
+    `<tr><td class="mono">${t.token}</td><td>${t.kind||''}</td><td>${t.weight||1}</td></tr>`).join('');
+  document.querySelector('#neg tbody').innerHTML = (c.negative_tokens||[]).map(t =>
+    `<tr><td class="mono">${t.token}</td><td>${t.vendor_scope||'-'}</td></tr>`).join('');
+  document.getElementById('grep').innerHTML = (c.grep_patterns||[]).map(g =>
+    `<li class="mono">${g.pattern||g}</li>`).join('');
+
+  document.querySelector('#members tbody').innerHTML = (c.members||[]).map(m => `<tr>
+    <td>${m.security_patch_id||''}</td>
+    <td>${m.is_representative ? '★' : ''}</td>
+    <td>${m.vendor||''} / ${m.model||''}</td>
+    <td>${m.old_version?'v'+m.old_version+'→v'+m.new_version:''}</td>
+    <td class="mono small">${m.binary_name||''} / ${m.function_name||''}</td>
+    <td class="mono small">${m.old_address||''} → ${m.new_address||''}</td>
+    <td>${m.confidence!=null ? m.confidence.toFixed(2) : ''}</td>
+    <td class="mono">${m.known_cve||''}</td>
+    <td class="truncate">${(m.note||'').slice(0,140)}</td>
+  </tr>`).join('') || `<tr><td colspan="9" class="muted">no members</td></tr>`;
+})();
+</script>
+{% endblock %}

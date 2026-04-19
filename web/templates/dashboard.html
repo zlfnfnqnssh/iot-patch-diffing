@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Dashboard - Patch-Learner{% endblock %}
+{% block content %}
+<h1>Dashboard</h1>
+
+<section id="totals-section">
+  <h2>Totals</h2>
+  <div id="totals" class="grid">로딩 중…</div>
+</section>
+
+<section>
+  <h2>Pattern Cards — severity (active only)</h2>
+  <div id="cards-severity" class="grid">로딩 중…</div>
+</section>
+
+<section>
+  <h2>Stage 2 큐 상태 (changed_functions)</h2>
+  <table id="stage2">
+    <thead><tr><th>status</th><th>count</th></tr></thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Top Pending Sessions (prefiltered_in)</h2>
+  <table id="sessions">
+    <thead>
+      <tr><th>#</th><th>vendor / model</th><th>old → new</th><th>남은 함수</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<section>
+  <h2>Recent Zero-Day Runs</h2>
+  <table id="runs">
+    <thead>
+      <tr><th>id</th><th>name</th><th>target</th><th>status</th><th>total</th><th>prefilt</th><th>done</th><th>vuln</th><th>updated</th></tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+</section>
+
+<script>
+(async () => {
+  const d = await fetch('/api/dashboard').then(r => r.json());
+  // totals
+  const tEl = document.getElementById('totals');
+  tEl.innerHTML = Object.entries(d.totals).map(([k,v]) => `<div class="cell"><div class="k">${k}</div><div class="v">${v ?? '-'}</div></div>`).join('');
+  // severity
+  const sEl = document.getElementById('cards-severity');
+  sEl.innerHTML = d.cards_severity.map(r => `<div class="cell sev-${r.severity}"><div class="k">${r.severity}</div><div class="v">${r.n}</div></div>`).join('');
+  // stage2
+  const stBody = document.querySelector('#stage2 tbody');
+  stBody.innerHTML = d.stage2_status.map(r => `<tr><td>${r.stage2_status}</td><td class="num">${r.n.toLocaleString()}</td></tr>`).join('');
+  // sessions
+  const sBody = document.querySelector('#sessions tbody');
+  sBody.innerHTML = d.top_pending_sessions.map(r => `<tr><td>${r.session_id}</td><td>${r.vendor} / ${r.model}</td><td>v${r.old_version} → v${r.new_version}</td><td class="num">${r.remaining}</td></tr>`).join('');
+  // runs
+  const rBody = document.querySelector('#runs tbody');
+  rBody.innerHTML = d.recent_runs.map(r => `<tr>
+    <td><a href="/zero-day/${r.id}">${r.id}</a></td>
+    <td>${r.name}</td>
+    <td>${r.target_vendor||''} / ${r.target_model||''} v${r.target_version||''}</td>
+    <td><span class="status status-${r.status}">${r.status}</span></td>
+    <td class="num">${r.total_functions}</td>
+    <td class="num">${r.prefiltered_functions}</td>
+    <td class="num">${r.processed_functions}</td>
+    <td class="num">${r.vuln_candidates}</td>
+    <td class="muted small">${r.updated_at||''}</td>
+  </tr>`).join('') || `<tr><td colspan="9" class="muted">아직 zero-day run 없음</td></tr>`;
+})();
+</script>
+{% endblock %}

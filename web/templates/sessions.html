@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Diff Sessions - Patch-Learner{% endblock %}
+{% block content %}
+<h1>Diff Sessions</h1>
+<table id="sessions">
+  <thead>
+    <tr><th>id</th><th>vendor</th><th>model</th><th>old → new</th><th>files</th><th>funcs</th><th>queued</th><th>drafted</th><th>advisory</th><th>status</th></tr>
+  </thead>
+  <tbody><tr><td colspan="10" class="muted">로딩 중…</td></tr></tbody>
+</table>
+<script>
+(async () => {
+  const d = await fetch('/api/sessions').then(r => r.json());
+  document.querySelector('#sessions tbody').innerHTML = d.sessions.map(s => `<tr>
+    <td>${s.session_id}</td>
+    <td>${s.vendor||''}</td>
+    <td class="mono small">${s.model||''}</td>
+    <td>v${s.old_version} → v${s.new_version}</td>
+    <td class="num">${s.files}</td>
+    <td class="num">${s.funcs}</td>
+    <td class="num">${s.queued}</td>
+    <td class="num">${s.drafted}</td>
+    <td class="mono small">${s.advisory||''}</td>
+    <td>${s.status||''}</td>
+  </tr>`).join('');
+})();
+</script>
+{% endblock %}

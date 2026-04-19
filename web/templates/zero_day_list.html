@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Zero-Day Runs - Patch-Learner{% endblock %}
+{% block content %}
+<h1>Zero-Day Runs</h1>
+<p class="muted">
+  새 run 생성·Agent 실행은 CLI에서:
+  <code>python src/stage2/zero_day_run.py init --name ... --binary ... --funcs-json ... --vendor ... --model ... --version ...</code>
+</p>
+<table id="runs">
+  <thead>
+    <tr><th>id</th><th>name</th><th>target</th><th>status</th><th>total</th><th>prefilt</th><th>done</th><th>vuln</th><th>updated</th><th></th></tr>
+  </thead>
+  <tbody><tr><td colspan="10" class="muted">로딩 중…</td></tr></tbody>
+</table>
+<script>
+(async () => {
+  const d = await fetch('/api/zero-day/runs').then(r => r.json());
+  document.querySelector('#runs tbody').innerHTML = d.runs.map(r => {
+    const pct = r.total_functions ? Math.round(100*r.processed_functions/r.total_functions) : 0;
+    return `<tr>
+      <td>${r.id}</td>
+      <td>${r.name}</td>
+      <td>${r.target_vendor||''} / ${r.target_model||''} v${r.target_version||''}</td>
+      <td><span class="status status-${r.status}">${r.status}</span></td>
+      <td class="num">${r.total_functions}</td>
+      <td class="num">${r.prefiltered_functions}</td>
+      <td class="num">${r.processed_functions} (${pct}%)</td>
+      <td class="num">${r.vuln_candidates}</td>
+      <td class="muted small">${r.updated_at||''}</td>
+      <td><a href="/zero-day/${r.id}">보기</a></td>
+    </tr>`;
+  }).join('') || `<tr><td colspan="10" class="muted">아직 run 없음 — CLI로 init 하세요</td></tr>`;
+})();
+</script>
+{% endblock %}

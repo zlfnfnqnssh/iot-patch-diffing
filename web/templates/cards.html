@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Pattern Cards - Patch-Learner{% endblock %}
+{% block content %}
+<h1>Pattern Cards</h1>
+
+<form id="filter" class="filter-bar">
+  <select name="severity"><option value="">severity (all)</option><option>high</option><option>medium</option><option>low</option></select>
+  <select name="status"><option value="active" selected>active</option><option value="all">all</option><option value="superseded_by_ours">superseded</option><option value="retired">retired</option></select>
+  <label><input type="checkbox" name="has_cve" value="1"> CVE labeled only</label>
+  <input type="text" name="q" placeholder="summary/origin 검색">
+  <button type="submit">Apply</button>
+  <span class="muted" id="count"></span>
+</form>
+
+<table id="cards">
+  <thead>
+    <tr>
+      <th>card_id</th><th>severity</th><th>source → sink</th><th>missing</th>
+      <th>origin</th><th>members</th><th>tokens</th><th>cve</th><th>summary</th>
+    </tr>
+  </thead>
+  <tbody><tr><td colspan="9" class="muted">로딩 중…</td></tr></tbody>
+</table>
+
+<script>
+async function load(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  const d = await fetch('/api/cards?' + qs).then(r => r.json());
+  document.getElementById('count').textContent = `${d.count} cards`;
+  const tb = document.querySelector('#cards tbody');
+  tb.innerHTML = d.cards.map(c => `<tr>
+    <td><a href="/cards/${c.pk}">${c.card_id}</a></td>
+    <td><span class="sev sev-${c.severity_hint||'unset'}">${c.severity_hint||'-'}</span></td>
+    <td class="mono">${c.source_type||''} → ${c.sink_type||''}</td>
+    <td class="mono">${c.missing_check||''}</td>
+    <td class="mono small">${c.snippet_origin||''}</td>
+    <td class="num">${c.member_count}</td>
+    <td class="num">${c.token_count}</td>
+    <td class="mono">${c.cve_similar||''}</td>
+    <td class="truncate">${(c.summary||'').slice(0,160)}</td>
+  </tr>`).join('') || `<tr><td colspan="9" class="muted">none</td></tr>`;
+}
+document.getElementById('filter').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const params = {};
+  for (const [k, v] of fd) if (v) params[k] = v;
+  load(params);
+});
+load({status: 'active'});
+</script>
+{% endblock %}
