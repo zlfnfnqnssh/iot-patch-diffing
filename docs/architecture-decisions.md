@@ -212,7 +212,82 @@ Reviewer를 없앤 대신 FP는 세 층에서 거른다.
 
 Hunter는 구조 변경 없음. 단 카드 입력 포맷이 공식 + 스니펫 shortform으로 확정됐고, `fixed_snippet`과 대상 함수가 동형이면 이미 패치된 것으로 보고 match=false로 내리는 규칙이 프롬프트에 내장됐다.
 
-## 14. 현재 문서화 기준
+## 14. Zero-Day 블라인드 헌트를 Stage 2 와 별도 경로로 둔다 (2026-04-21)
+
+Stage 2 Drafter는 diff (OLD/NEW) 기반 판정이라 패치가 있는 버전에만 동작. 실제 제로데이 헌팅은 **단일 바이너리의 모든 함수를 학습 카드 vs 블라인드 Agent 로 감사**하는 비-diff 경로가 필요. Stage 3 Hunter 는 토큰 기반 prefilter 만 하므로 부족.
+
+### 블라인드 헌터의 범위
+
+- 입력: **단일 바이너리** 1개 (IDA 전체 함수 디컴파일 JSON) + 학습된 `pattern_cards`
+- 출력: `zero_day_verdicts` — 함수당 취약/정상 판정 + matched_card_pk (없으면 novel) + root_cause
+- 별도 테이블: `zero_day_runs` / `zero_day_functions` / `zero_day_verdicts` — Stage 2 테이블과 분리
+- 재사용: `prefilter.py` 의 DANGEROUS_KEYWORDS, `pattern_card_tokens/negative_tokens`
+
+### 블라인드 제약 (하드 규칙, 프롬프트 내장)
+
+실제 제로데이 연구를 시뮬레이션하려면 Agent 가 외부 CVE 지식을 사용하면 안 된다.
+
+- 외부 지식 완전 차단 (CVE DB / 벤더 advisory / 연구자 블로그 사전 기억 없는 척)
+- 파일 읽기 allow-list: `zero_day_hunter.md` / `hard-rules.md` / `pattern-card-spec.md` / 입력 JSON
+- 차단 파일: `cve-*.md`, `kve*.md`, `advisory*`, `changelog*`
+- WebSearch/WebFetch 절대 금지
+- 출력 field 전체에 `CVE-\d{4}-\d+` / `KVE-\d{4}-\d+` 정규식 매치 0건 (사후 검증)
+
+카드의 `cve_similar` 필드가 있어도 **opaque label 로만** 취급 — Agent 가 그 CVE 가 무엇인지 안다고 가정 금지.
+
+### Validation 기법: "알려진 CVE 카드 은닉" 검증
+
+`zero_day_run.py prepare --exclude-card-pk <pk>` 로 특정 카드를 Agent context 에서 제거. 이미 해당 CVE 의 공식을 학습한 카드를 숨긴 채 Agent 가 같은 함수·같은 공식을 **독자적으로 재도출** 하는지 측정.
+
+sonia v2.880.0.16 에서 **P-106 (CVE-2025-31700) 은닉** 후 48개 함수 (CVE 타겟 8 + 디코이 40) 블라인드 실행 → **v3 프롬프트로 CVE-31700/31701 타겟 둘 다 3축 재도출 + 같은 함수 addr 포착 + CVE 번호 누출 0**.
+
+### size-literal anchoring 금지 규칙 (v3 프롬프트)
+
+v2 실패 사례에서 도출:
+
+- v2 Agent가 `sub_10B0FBC(..., v97, 0x7FFu)` 같은 literal size 인자 보고 "bounded → benign" 로 short-circuit.
+- 실제 CVE-31700 본질은 size 가 `(bracket_ptr - dest)` 같은 attacker-controlled 산술 결과 — literal 이 아니라 **"size 의 origin"** 이 중요.
+
+v3 규칙: size 가 literal 이어도 bounded 결론 금지. 반드시 출처 (`strlen(user)` / pointer 산술 / strchr 결과) 를 따져야 함. 출처 불분명 시 conf 0.5~0.65 + needs_human_review.
+
+### 피드백 루프 (승격)
+
+블라인드 Agent 가 novel 로 판정한 verdict 는 자동으로 `pattern_cards` 에 승격하지 않는다. 사람 리뷰 → `confirmed_vuln` 확정 후 명시적 promote. 자동 승격은 false positive 로 라이브러리를 오염시킬 수 있음.
+
+---
+
+## 15. 팀 카드 card_id 병합 시 우리 카드를 shift 한다 (2026-04-21)
+
+팀장 원본 `pattern_cards.jsonl` 32장과 내 DB 74장이 **같은 card_id (P-001..P-032) 를 서로 다른 공식으로 사용**. 병합 시 충돌.
+
+### 결정
+
+팀 기준 번호 보존, **우리 카드를 뒤로 shift** (P-001..P-074 → P-033..P-106). TMP-N 중간 상태로 UNIQUE 충돌 회피. `idx_pc_formula_active` 충돌하면 팀 카드를 `status='superseded_by_ours' + superseded_by=<our_id>` 로 보존.
+
+`card_id` 문자열은 표시 라벨, 모든 FK 는 `pattern_cards.id` (INT pk) 로 유지되므로 외부 참조는 깨지지 않음.
+
+---
+
+## 16. 웹 대시보드는 읽기 전용 + 리뷰만 쓰기로 분리한다 (2026-04-21)
+
+CLI SQL 로 상태 확인하던 것을 localhost 웹 UI 로 전환. DB 연결 기본 `file:...?mode=ro` + `PRAGMA query_only=1`. 예외는 사람 리뷰 저장 (`POST /api/zero-day/verdicts/{vid}/review`) 만 별도 write-enabled connection. Agent 실행/배치 트리거는 웹 불가, CLI만 — 단일 오케스트레이터 단순화.
+
+SSE 2초 간격 진행률 push, 취약 판정은 **모달이 아닌 인라인 카드** (LLM root_cause + attack_scenario + raw_reasoning 전문 + 리뷰 폼) 로 표시.
+
+---
+
+## 17. 현재 문서화 기준
+
+2026-04-21 기준으로 다음 항목이 추가 반영됐다.
+
+- Zero-Day 블라인드 헌트 경로: `.claude/skills/stage2/sql/zero_day_migration.sql`, `prompts/zero_day_hunter.md`, `src/stage2/zero_day_run.py`, `ida_user/extract_all_funcs.py`
+- 웹 대시보드: `web/` (FastAPI + Jinja2 + SSE, 한국어화 완료, localhost:8787)
+- 팀 카드 병합: `src/stage2/merge_team_cards.py`, DB 총 106장 (99 active + 7 superseded)
+- CVE ground truth: `data/cve/ground_truth.jsonl` (3건 — CVE-2025-31700/31701, KVE-2023-5458)
+- pattern_cards 전체 export: `src/stage2/export_pattern_cards_jsonl.py` → `pattern_cards.jsonl` (106장)
+- security_patches 세션 export: `src/stage2/export_sp_session_jsonl.py` → `data/handoff/security_patches_session.jsonl` (572건)
+- 운영 런북 추가: `docs/zero-day-runbook.md`
+- size-literal anchoring 금지 규칙 (zero_day_hunter.md v3)
 
 2026-04-17 기준으로 다음 항목이 추가 반영됐다.
 
