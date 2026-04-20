@@ -4,6 +4,193 @@
 
 ---
 
+### 2026-04-21 | 팀 카드 병합 + Zero-Day 인프라 구축 + CVE-31700/31701 블라인드 재탐지 (3회차 프롬프트 튜닝)
+
+**배경:**
+
+4-19 에 만든 P-074(CVE-2025-31700) 카드를 토대로 실제 제로데이 시뮬레이션 전면 실행. 동시에 팀장 요청으로 ground_truth.jsonl + pattern_cards.jsonl 병합 handoff 진행. 웹 대시보드 (FastAPI) 구축해서 CLI SQL 의존 제거.
+
+---
+
+#### A. 팀 카드 병합 (team P-001..P-032 + 우리 P-001..P-074)
+
+**문제:** 팀장이 보낸 `pattern_cards.jsonl` 32장과 내 DB 74장이 같은 card_id P-001..P-032 를 서로 다른 공식으로 사용. 겹치는 32개 card_id 의 formula 가 0/32 일치.
+
+**해결 (`src/stage2/merge_team_cards.py`):**
+1. DB 백업 (`.bak.premerge-team-*`)
+2. 우리 P-001..P-074 → **P-033..P-106** 로 shift (TMP-N 경유 2-phase update)
+3. 팀 32장을 P-001..P-032 로 insert + tokens / negative_tokens / grep_patterns 복제
+4. `idx_pc_formula_active` UNIQUE 충돌시 → `status='superseded_by_ours'` + `superseded_by=<our_id>` 로 마킹
+5. 팀 카드의 `members[].security_patch_id` 는 상대 DB 기준이라 skip
+
+**결과:** 74 → **106 카드** (99 active + 7 superseded). 팀 기준 번호 보존. CVE-2025-31700 카드: P-074 → **P-106** 으로 이동 (내부 pk=74 유지).
+
+---
+
+#### B. 팀장 handoff (`data/cve/ground_truth.jsonl` + `data/handoff/security_patches_session.jsonl`)
+
+팀장 요청 스키마대로 출력:
+
+- `data/cve/ground_truth.jsonl` (3 entries) — CVE-2025-31700, CVE-2025-31701 (cve-2025-31700.md 기반), KVE-2023-5458 (kve.md 기반). 필드: cve_id, vendor, model, vuln/patched_version, target_binary/function/address, cvss/cwe, source_type/sink_type/missing_check 등 enum 매핑, root_cause_summary, references_url, source.
+
+- `data/handoff/security_patches_session.jsonl` (572 rows) — `is_security_patch=1` 전체. 세션/펌웨어/함수/Drafter 판정 + `pattern_card_memberships[]` 연결 정보 포함. 123건 카드 연결, Dahua 493 / TP-Link 61 / ipTIME 18.
+
+- `pattern_cards.jsonl` 도 같은 방식으로 export (`src/stage2/export_pattern_cards_jsonl.py`) — 카드 + tokens + negative_tokens + grep_patterns + stats + members 전부 merge, 106장 단일 파일.
+
+- `.gitignore` + `scripts/push_team_artifacts.sh` — `data/cve/` 경로 화이트리스트 추가.
+
+- `origin/main` + `team/riri` 양쪽 push 완료 (commit `0ed30cd`).
+
+---
+
+#### C. Zero-Day 블라인드 헌트 인프라 (플랜 승인 후 구현)
+
+**신규 파일:**
+
+1. **DB 스키마** (`.claude/skills/stage2/sql/zero_day_migration.sql`)
+   - `zero_day_runs` — run 메타 + 진행률 카운터
+   - `zero_day_functions` — run 별 함수 pseudocode + prefiltered 플래그
+   - `zero_day_verdicts` — Agent 판정 레코드 (matched_card_pk 포함) + 사람 리뷰 필드
+
+2. **블라인드 프롬프트** (`.claude/skills/stage2/prompts/zero_day_hunter.md`)
+   - STRICT CONSTRAINTS: 외부 지식 금지, `cve-*.md/kve*.md/advisory*` 파일 읽기 금지, WebSearch/WebFetch 금지, 출력에 `CVE-\d{4}-\d+` / `KVE-\d{4}-\d+` 정규식 매치 금지
+   - 3-way decision: (a) existing card match / (b) novel formula / (c) benign
+   - confidence ≥0.85 = 3축 모두 visible, 0.70~0.84 = 2/3축, <0.50 = 자동 benign
+
+3. **오케스트레이터** (`src/stage2/zero_day_run.py`)
+   - `migrate / init / prefilter / prepare / split / apply / status / list / cards-context` 커맨드
+   - `prepare --exclude-card-pk N` 옵션 — 특정 카드를 Agent context에서 은닉 (validation 용)
+   - `prepare --order size_desc|size_asc|id` — 함수 선택 순서
+   - 프리필터 키워드 확장: 기존 libc 계열 + stripped binary 대응 (HTTP 헤더명 literal `"Host"`, `"Content-"`, `"Cseq"`, 셸 명령 literal `/bin/sh`, `/tmp/`, 포맷 문자열 `"%s"` 등)
+
+4. **주소 지정 prepare** (`src/stage2/zero_day_prepare_addrs.py`) — 특정 함수 주소 + 디코이 N개로 focus batch 구성. CVE 타겟 함수 8개 + 40 random 큰 함수 조합.
+
+5. **전체 함수 디컴파일** (`ida_user/extract_all_funcs.py`) — 체크포인트 + resume 지원. sonia v2.880.0.16 (33MB 바이너리) → **121,900 함수** (116,589 decompiled, 5,311 decompile failed, 22,495 skip_small). IDA exit code 4로 종료됐으나 `.partial` 에 전체 checkpoint 저장됨 → 그대로 사용.
+
+**Run 1 초기화 결과:**
+```
+run_id=1  name="sonia_v2.880.0.16_blind_noP106"  vendor=dahua/Kant
+  total_functions       = 121,900
+  prefiltered_functions = 1,468  (1.2%)
+  P-106 (CVE-2025-31700) 카드 Agent context 에서 은닉
+```
+
+---
+
+#### D. 프롬프트 튜닝 3회차 (동일 48 함수: CVE 타겟 8 + 디코이 40)
+
+같은 focus batch 를 3번 재실행해 프롬프트 표현이 판정에 미치는 영향 측정.
+
+| 버전 | 프롬프트 특이점 | 총 vuln | CVE-31700 타겟 | CVE-31701 타겟 |
+|---|---|---|---|---|
+| v1 | 카드 인용 요구 없음 | 3 | ✅ 적중 (conf 0.55) — **sink/missing 2축 틀림** (heap/auth_check) | ❌ benign+review |
+| v2 | "근거 카드 인용 + 축 일치 명시" 강제 | 3 | ❌ **benign 판정** (literal size 0x7FFu 보고 bounded 결론) | ✅ novel (P-100 2축 일치) |
+| **v3** | v2 + **"size-literal anchoring 금지" 문단** 추가 | **7** | ✅ **공식 3축 완벽** (http_header → stack_buffer_copy + length_bound, conf 0.6) | ✅ stack_buffer_copy + length_bound, conf 0.6 |
+
+**v2 실패 원인:** Agent 가 `sub_10B0FBC(..., v97, 0x7FFu)` 같은 literal size argument 를 보면 "bounded → benign" 으로 short-circuit. 실제 CVE-31700 은 size 가 `(bracket_ptr - dest)` 같은 attacker-controlled 산술 결과로 넘어가는 게 본질 — Agent 가 해당 함수 내부에서는 literal 만 보고 외부 helper 내부로 데이터 흐름을 따라가지 못함.
+
+**v3 핵심 추가 문단 (프롬프트):**
+```
+A size/length argument being present or a const literal does NOT prove safety.
+Before concluding "bounded → benign", trace where the size comes from:
+- 0x7FF, 256, sizeof(buf) → literal, bounded
+- strlen(user_input) → attacker-controlled, unbounded
+- (p2 - p1) where p1/p2 from strchr/strstr on attacker input → HIGH RISK
+When size provenance unclear → conf 0.5~0.65 + needs_human_review
+```
+
+**v3 reasoning 예시 (sub_10E537C, CVE-31700 target):**
+> size-literal-anchoring 규칙 적용: 0x7FFu는 literal 상수이므로 이 함수 경계 안에서는 bounded. 그러나 중요한 점은 `sub_10B0FBC` 내부에서 Host 문자열과 v51(request 객체)을 실제 복사하는 경계는 함수 외부, size provenance 는 본 함수 안에서 literal이지만 **외부에서 `strchr/strstr/getHeader` 기반 포인터 산술로 재계산될 가능성 검토 필요** → confidence 0.6, needs_human_review=true
+
+**v3 총 7 vuln 판정 (48 중):**
+1. `sub_10E537C` (OnvifHandler::handleRequest) — **CVE-2025-31700** 타겟 ✅
+2. `sub_417B2C` (RPC2_UploadFileWithName handler) — **CVE-2025-31701** 타겟 ✅
+3. `sub_C7588` (PTP handleManagement) — novel
+4. `sub_16811CC` (mDNSCoreReceive) — novel
+5. `sub_104CCD8` (CUpgrader::appendData) — novel (uint32 wrap)
+6. `sub_17792C` (DVRIP F4 proxy hook) — novel (auth_check bypass)
+7. `sub_3EF224` (setLocalityConfig) — novel (silent truncation)
+
+**블라인드 제약:** 3회차 전부 `raw_reasoning` + `root_cause` + `attack_scenario` 필드에 CVE/KVE 번호 정규식 매치 0건 유지. 모든 Agent가 `cve-*.md/kve.md` 파일 존재 확인 후 "resisted" 명시.
+
+---
+
+#### E. 웹 대시보드 (`web/` 신규 디렉토리)
+
+FastAPI + Jinja2 + SSE, localhost:8787. venv + requirements.txt + `run.ps1/run.sh`.
+
+**API 엔드포인트 (routes_dashboard / routes_cards / routes_sessions / routes_zero_day):**
+- `/api/dashboard` — 테이블 totals + severity 분포 + stage2 큐 + top pending sessions + recent runs
+- `/api/cards?severity=&status=&q=` + `/api/cards/{pk}` 상세
+- `/api/sessions` (one-shot aggregate로 최적화 — 최초 구현은 833 sessions × 3 subquery 로 30s+ timeout 발생, GROUP BY 한 번으로 0.86s 로 단축)
+- `/api/findings?card_id=&min_score=`
+- `/api/zero-day/runs` + `/api/zero-day/runs/{id}` + `/verdicts?vuln=1&min_conf=0.5`
+- `POST /api/zero-day/verdicts/{vid}/review` — 사람 리뷰 저장 (write enabled 별도 connection)
+- `/api/zero-day/runs/{id}/stream` — SSE 2초 간격 진행률 push
+
+**페이지:**
+- `/` 대시보드
+- `/cards` 목록 + `/cards/{pk}` 상세
+- `/sessions`
+- `/findings`
+- `/zero-day` 리스트
+- `/zero-day/{run_id}` — **취약 판정 인라인 카드 뷰** (LLM root_cause + attack_scenario + raw_reasoning 펼쳐서 바로 읽힘, pseudocode lazy load, 사람 리뷰 폼)
+
+**한국어화** (`static/labels.js`):
+- 네비: 대시보드 / 패턴 카드 / Diff 세션 / 헌터 결과 / 제로데이
+- 테이블명: `firmware_versions` → "펌웨어 버전" (한글 라벨 + 원문 키 병기)
+- 심각도: high → "높음 (high)", medium → "중간", low → "낮음"
+- stage2_status: prefiltered_in → "Drafter 큐에 들어감" 등
+- run_status: running → "진행 중"
+
+**CSS 이슈 해결:**
+- `pre.prose-block` 이 기본 `white-space: pre` 로 가로 스크롤 발생 → `!important` 로 `white-space: pre-wrap + word-break: break-word + overflow-x: hidden` 강제 + `/static/style.css?v=3` 캐시 버스터
+
+---
+
+#### F. 구조적 한계 & 다음 단계
+
+**한계:**
+- `matched_card_pk` 를 Agent 가 None(novel) 으로 판정하면 `pattern_cards` 에 자동 승격되지 않음. 사람 리뷰 → 명시적 promote 경로가 아직 없음. 후보: web 에 "Promote to pattern_card" 버튼 + `zero_day_run.py promote <vid>` CLI.
+- v3 프롬프트가 7 vuln 을 냈지만 그 중 5개가 사람 리뷰 대기 (novel). 진짜 제로데이 vs FP vs 이미 다른 곳에서 고쳐진 것 구분은 수동.
+- IDA full-decompile 이 exit code 4 로 종료 (145K 함수 중 144K 처리 후). `.partial` checkpoint 로 복구.
+
+**후속:**
+- sonia 남은 1,468 − 48 = 1,420 함수 v3 프롬프트로 batch 계속
+- 2-Pass 구조 (Pass1=free-form bug-shape description, Pass2=card matching) 실험 여부 결정
+- 웹 Promote 버튼 추가
+
+**신규/수정 파일 (이번 세션):**
+
+신규:
+- `.claude/skills/stage2/sql/zero_day_migration.sql`
+- `.claude/skills/stage2/prompts/zero_day_hunter.md`
+- `src/stage2/zero_day_run.py`
+- `src/stage2/zero_day_prepare_addrs.py`
+- `src/stage2/merge_team_cards.py`
+- `src/stage2/export_pattern_cards_jsonl.py`
+- `src/stage2/export_sp_session_jsonl.py`
+- `ida_user/extract_all_funcs.py`
+- `ida_user/decompile_selected.py`
+- `ida_user/find_xrefs_and_dump.py`
+- `ida_user/find_named_funcs.py`
+- `web/app.py` + `api/{db,routes_dashboard,routes_cards,routes_sessions,routes_zero_day}.py`
+- `web/templates/{base,dashboard,cards,card_detail,sessions,findings,zero_day_list,zero_day_detail}.html`
+- `web/static/{style.css,app.js,labels.js}` + `requirements.txt` + `run.ps1/run.sh`
+- `docs/zero-day-runbook.md`
+- `data/cve/ground_truth.jsonl`
+- `pattern_cards.jsonl` (project root, 106장)
+
+수정:
+- `.gitignore` — `data/cve/` 추적 허용
+- `scripts/push_team_artifacts.sh` — `data/cve/` 경로 추가
+
+**Git 동기화:**
+- `origin/main` + `team/riri` 양쪽 push 완료
+- Backup: `Patch-Learner-main/src/db/patch_learner.db.bak.premerge-team-1776613673`
+
+---
+
 ### 2026-04-19 | Stage 2 Drafter 배치 4건 + CVE-2025-31700 블라인드 탐지 성공 + 팀장 handoff + Zero-Day 플랜 승인
 
 **배경:**

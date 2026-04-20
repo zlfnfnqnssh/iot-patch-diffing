@@ -40,6 +40,7 @@ DEFAULT_DB = PROJECT_ROOT / "Patch-Learner-main" / "src" / "db" / "patch_learner
 MIGRATION_SQL = PROJECT_ROOT / ".claude" / "skills" / "stage2" / "sql" / "zero_day_migration.sql"
 
 DANGEROUS_KEYWORDS = [
+    # Classic libc (when symbols preserved)
     "system(", "popen(", "execl(", "execlp(", "execle(",
     "execv(", "execvp(", "execve(", "posix_spawn(",
     "sprintf(", "strcpy(", "strcat(", "gets(", "vsprintf(",
@@ -50,6 +51,16 @@ DANGEROUS_KEYWORDS = [
     "symlink(", "mkdir(",
     "recv(", "recvfrom(", "scanf(", "sscanf(", "fscanf(",
     "strtok(", "realpath(",
+    # Stripped-binary signals (match in the `strings` JSON field)
+    # - HTTP header names + format specifiers strongly suggest header/string building
+    '"Host"', '"Content-', '"Cseq"', '"CSeq"', '"Authorization"',
+    '"Cookie"', '"Referer"', '"User-Agent"', '"X-',
+    # - Risky shell command literals
+    "/bin/sh", "/bin/bash", "rm -rf", "chmod +x", "/tmp/",
+    # - Format-string sinks
+    '"%s"', '"%d"', '"%x"',
+    # - printf family format often used unsafely
+    "%s %s", "%s/%s", "%s:%s",
 ]
 DANGER_RE = re.compile("|".join(re.escape(k) for k in DANGEROUS_KEYWORDS))
 
@@ -125,11 +136,11 @@ def cmd_prefilter(args: argparse.Namespace) -> int:
         print(f"[prefilter] run {args.run_id} has no functions", file=sys.stderr)
         return 1
 
-    c.execute("SELECT id, pseudocode, disasm FROM zero_day_functions WHERE run_id=?", (args.run_id,))
+    c.execute("SELECT id, pseudocode, disasm, strings FROM zero_day_functions WHERE run_id=?", (args.run_id,))
     pf_yes = []
     pf_no = []
     for r in c.fetchall():
-        text = (r["pseudocode"] or "") + "\n" + (r["disasm"] or "")
+        text = (r["pseudocode"] or "") + "\n" + (r["disasm"] or "") + "\n" + (r["strings"] or "")
         if DANGER_RE.search(text):
             pf_yes.append(r["id"])
         else:
@@ -152,8 +163,13 @@ def cmd_prefilter(args: argparse.Namespace) -> int:
     return 0
 
 
-def _active_cards_context(conn: sqlite3.Connection) -> list[dict]:
-    """Load active pattern_cards as the Agent context list."""
+def _active_cards_context(conn: sqlite3.Connection, exclude_pks: set[int] | None = None) -> list[dict]:
+    """Load active pattern_cards as the Agent context list.
+
+    exclude_pks: integer primary keys to hide (e.g., for blind validation — hide
+    the CVE ground-truth card so the Agent must re-derive it).
+    """
+    exclude_pks = exclude_pks or set()
     out = []
     c = conn.cursor()
     for r in c.execute("""
@@ -161,6 +177,8 @@ def _active_cards_context(conn: sqlite3.Connection) -> list[dict]:
                severity_hint, cve_similar
         FROM pattern_cards WHERE status='active' ORDER BY id
     """):
+        if r["id"] in exclude_pks:
+            continue
         out.append({
             "pk": r["id"], "card_id": r["card_id"],
             "formula": [r["source_type"], r["sink_type"], r["missing_check"]],
@@ -172,9 +190,13 @@ def _active_cards_context(conn: sqlite3.Connection) -> list[dict]:
     # tokens
     tok_by_pk: dict[int, list] = {}
     for r in c.execute("SELECT card_id, token, kind, weight FROM pattern_card_tokens"):
+        if r[0] in exclude_pks:
+            continue
         tok_by_pk.setdefault(r[0], []).append({"token": r[1], "kind": r[2], "weight": r[3]})
     neg_by_pk: dict[int, list] = {}
     for r in c.execute("SELECT card_id, token, vendor_scope FROM pattern_card_negative_tokens"):
+        if r[0] in exclude_pks:
+            continue
         neg_by_pk.setdefault(r[0], []).append({"token": r[1], "vendor_scope": r[2]})
     for card in out:
         card["tokens"] = tok_by_pk.get(card["pk"], [])
@@ -182,9 +204,22 @@ def _active_cards_context(conn: sqlite3.Connection) -> list[dict]:
     return out
 
 
+def _parse_exclude_pks(raw: str | None) -> set[int]:
+    if not raw:
+        return set()
+    out: set[int] = set()
+    for tok in raw.split(","):
+        tok = tok.strip()
+        if not tok:
+            continue
+        out.add(int(tok))
+    return out
+
+
 def cmd_cards_context(args: argparse.Namespace) -> int:
     conn = open_db(args.db)
-    cards = _active_cards_context(conn)
+    exclude = _parse_exclude_pks(getattr(args, "exclude_card_pk", None))
+    cards = _active_cards_context(conn, exclude_pks=exclude)
     args.out = Path(args.out) if args.out else None
     payload = {"count": len(cards), "cards": cards}
     if args.out:
@@ -205,11 +240,17 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         print(f"[prepare] run {args.run_id} not found", file=sys.stderr)
         return 1
 
+    order_sql = {
+        "id": "id ASC",
+        "size_desc": "LENGTH(pseudocode) DESC, size DESC",
+        "size_asc": "LENGTH(pseudocode) ASC",
+    }.get(getattr(args, "order", "id"), "id ASC")
+
     pending = c.execute(
-        """SELECT id, addr, name, size, pseudocode, disasm, calls, strings
-           FROM zero_day_functions
-           WHERE run_id=? AND stage_status='pending' AND prefiltered=1
-           ORDER BY id LIMIT ?""",
+        f"""SELECT id, addr, name, size, pseudocode, disasm, calls, strings
+            FROM zero_day_functions
+            WHERE run_id=? AND stage_status='pending' AND prefiltered=1
+            ORDER BY {order_sql} LIMIT ?""",
         (args.run_id, args.limit),
     ).fetchall()
 
@@ -227,7 +268,10 @@ def cmd_prepare(args: argparse.Namespace) -> int:
         )
     conn.commit()
 
-    cards = _active_cards_context(conn)
+    exclude = _parse_exclude_pks(getattr(args, "exclude_card_pk", None))
+    if exclude:
+        print(f"[prepare] excluding {len(exclude)} card pk(s) from context: {sorted(exclude)}")
+    cards = _active_cards_context(conn, exclude_pks=exclude)
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -466,6 +510,10 @@ def main() -> int:
     p.add_argument("run_id", type=int)
     p.add_argument("--limit", type=int, default=200)
     p.add_argument("--out", required=True)
+    p.add_argument("--exclude-card-pk", default=None,
+                   help="comma-separated pattern_cards.id to hide from Agent context (blind validation)")
+    p.add_argument("--order", choices=["id", "size_desc", "size_asc"], default="id",
+                   help="order of functions picked for this batch")
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("split")
@@ -487,6 +535,7 @@ def main() -> int:
 
     p = sub.add_parser("cards-context")
     p.add_argument("--out", default=None)
+    p.add_argument("--exclude-card-pk", default=None)
     p.set_defaults(func=cmd_cards_context)
 
     args = ap.parse_args()
