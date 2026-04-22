@@ -118,6 +118,7 @@ def _ensure_card_and_merge(
     card: dict[str, Any],
     security_patch_id: int,
     snippet_origin: str,
+    batch_tag: str | None = None,
 ) -> int:
     """Auto-merge 규칙 적용.
 
@@ -187,8 +188,8 @@ def _ensure_card_and_merge(
             card_id, source_type, source_detail, sink_type, sink_detail, missing_check,
             summary, vulnerable_snippet, fixed_snippet, snippet_origin, snippet_language,
             long_description, attack_scenario, fix_detail,
-            severity_hint, cve_similar, advisory, status, version
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1)
+            severity_hint, cve_similar, advisory, status, version, created_in_batch
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 1, ?)
         """,
         (
             new_card_id,
@@ -200,6 +201,7 @@ def _ensure_card_and_merge(
             snippet_origin, card.get("snippet_language", "decompiled_c"),
             card.get("long_description"), card.get("attack_scenario"), card.get("fix_detail"),
             card.get("severity_hint"), card.get("cve_similar"), card.get("advisory"),
+            batch_tag,
         ),
     )
     card_pk = c.lastrowid
@@ -358,7 +360,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
                     (card["source_type"], card["sink_type"], card["missing_check"]),
                 ).fetchone()
 
-                card_pk = _ensure_card_and_merge(conn, card, sp_id, snippet_origin)
+                card_pk = _ensure_card_and_merge(conn, card, sp_id, snippet_origin, batch_tag=getattr(args, "batch", None))
                 if existing_before:
                     merged_cards += 1
                 else:
@@ -656,6 +658,7 @@ def main() -> int:
     p2 = sub.add_parser("apply", help="Drafter 출력 DB 반영 (1개 또는 여러 파일)")
     p2.add_argument("output_jsons", nargs="+", help="out_*.json 파일 1개 이상")
     p2.add_argument("--keep-tmp", action="store_true", help="apply 후 tmp in_*/out_* 자동 삭제 끄기")
+    p2.add_argument("--batch", default=None, help="새로 생성되는 pattern_cards 에 기록할 batch 태그 (예: 'v2', 'v3', 'batch-04-29'). delta hunt 에서 이 태그로 필터링.")
 
     p6 = sub.add_parser("reset", help="Stage 2 전체 리셋 (security_patches + pattern_cards 등 삭제)")
     p6.add_argument("--yes", action="store_true", help="안전장치 — 실제 삭제하려면 --yes 필수")

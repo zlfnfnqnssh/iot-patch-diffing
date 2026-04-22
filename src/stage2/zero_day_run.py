@@ -163,20 +163,38 @@ def cmd_prefilter(args: argparse.Namespace) -> int:
     return 0
 
 
-def _active_cards_context(conn: sqlite3.Connection, exclude_pks: set[int] | None = None) -> list[dict]:
+def _active_cards_context(
+    conn: sqlite3.Connection,
+    exclude_pks: set[int] | None = None,
+    batch_filter: str | None = None,
+) -> list[dict]:
     """Load active pattern_cards as the Agent context list.
 
-    exclude_pks: integer primary keys to hide (e.g., for blind validation — hide
-    the CVE ground-truth card so the Agent must re-derive it).
+    exclude_pks: integer primary keys to hide (for blind validation — hide
+      the CVE ground-truth card so the Agent must re-derive it).
+    batch_filter: if given, only cards with `created_in_batch=<value>` pass
+      (delta hunt — 이번 주 netnew 카드만 쏘고 싶을 때). None = 전체 active.
     """
     exclude_pks = exclude_pks or set()
     out = []
     c = conn.cursor()
-    for r in c.execute("""
-        SELECT id, card_id, source_type, sink_type, missing_check, summary,
-               severity_hint, cve_similar
-        FROM pattern_cards WHERE status='active' ORDER BY id
-    """):
+    if batch_filter:
+        query = """
+            SELECT id, card_id, source_type, sink_type, missing_check, summary,
+                   severity_hint, cve_similar
+            FROM pattern_cards WHERE status='active' AND created_in_batch = ?
+            ORDER BY id
+        """
+        rows_iter = c.execute(query, (batch_filter,))
+    else:
+        query = """
+            SELECT id, card_id, source_type, sink_type, missing_check, summary,
+                   severity_hint, cve_similar
+            FROM pattern_cards WHERE status='active'
+            ORDER BY id
+        """
+        rows_iter = c.execute(query)
+    for r in rows_iter:
         if r["id"] in exclude_pks:
             continue
         out.append({
@@ -271,7 +289,11 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     exclude = _parse_exclude_pks(getattr(args, "exclude_card_pk", None))
     if exclude:
         print(f"[prepare] excluding {len(exclude)} card pk(s) from context: {sorted(exclude)}")
-    cards = _active_cards_context(conn, exclude_pks=exclude)
+    batch_filter = getattr(args, "batch_filter", None)
+    if batch_filter:
+        print(f"[prepare] batch filter: only cards with created_in_batch='{batch_filter}'")
+    cards = _active_cards_context(conn, exclude_pks=exclude, batch_filter=batch_filter)
+    print(f"[prepare] cards in Agent context: {len(cards)}")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -363,8 +385,8 @@ def cmd_apply(args: argparse.Namespace) -> int:
                     source_type, sink_type, missing_check,
                     matched_card_pk, matched_score,
                     root_cause, attack_scenario, agent_id,
-                    raw_reasoning, needs_human_review
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    raw_reasoning, needs_human_review, source_batch
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 args.run_id,
                 zdf_id,
@@ -384,6 +406,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
                 v.get("agent_id"),
                 v.get("raw_reasoning"),
                 1 if v.get("needs_human_review") else 0,
+                getattr(args, "batch", None),
             ))
             total_insert += 1
             if v.get("is_vulnerable"):
@@ -514,6 +537,8 @@ def main() -> int:
                    help="comma-separated pattern_cards.id to hide from Agent context (blind validation)")
     p.add_argument("--order", choices=["id", "size_desc", "size_asc"], default="id",
                    help="order of functions picked for this batch")
+    p.add_argument("--batch-filter", default=None,
+                   help="Agent context 에 올릴 카드를 pattern_cards.created_in_batch=<value> 로 제한. Delta hunt 용 (이번 주 netnew 카드만 쏘기).")
     p.set_defaults(func=cmd_prepare)
 
     p = sub.add_parser("split")
@@ -524,6 +549,7 @@ def main() -> int:
     p = sub.add_parser("apply")
     p.add_argument("run_id", type=int)
     p.add_argument("output_jsons", nargs="+")
+    p.add_argument("--batch", default=None, help="zero_day_verdicts.source_batch 에 기록할 태그 (예: 'v2-netnew'). 어떤 카드셋으로 Agent 가 판정했는지 추적용.")
     p.set_defaults(func=cmd_apply)
 
     p = sub.add_parser("status")
